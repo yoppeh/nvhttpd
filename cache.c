@@ -125,6 +125,9 @@ static inline size_t hash(const char *key) {
 static inline int init_element(cache_element_s *e) {
     debug_enter();
     int rc = 1;
+    e->len = 0;
+    e->data = NULL;
+    e->mime = NULL;
     FILE *f = fopen(e->path, "r");
     if (f == NULL) {
         goto term;
@@ -152,6 +155,9 @@ term:
     }
     if (f != NULL) {
         fclose(f);
+    }
+    if (rc != 0) {
+        e->mime = NULL;
     }
     debug_return rc;
 }

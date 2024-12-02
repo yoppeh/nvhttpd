@@ -131,6 +131,10 @@ static void *handle_client_request(void *arg) {
     if (request == NULL) {
         goto terminate;
     }
+    if (request->path == NULL) {
+        logger_error(client->server->logger, "no path in request");
+        goto terminate;
+    }
     path = malloc(strlen(html_path) + strlen(request->path) + 1);
     if (path == NULL) {
         logger_error(client->server->logger, "malloc failed: %s", strerror(errno));
@@ -153,10 +157,12 @@ static void *handle_client_request(void *arg) {
         memcpy(path, html_path, strlen(html_path));
         memcpy(path + strlen(html_path), response_404_path, sizeof(response_404_path));
         e = cache_find(path);
+        if (e != NULL) {
         size_t header_len = 0;
-        char * header = http_response_header(HTTP_RESPONSE_404, e->len, e->mime, response_headers, &header_len);
-        send(client->fd, header, header_len, 0);
-        send(client->fd, e->data, e->len, 0);
+            char * header = http_response_header(HTTP_RESPONSE_404, e->len, e->mime, response_headers, &header_len);
+            send(client->fd, header, header_len, 0);
+            send(client->fd, e->data, e->len, 0);
+        }
     }
 terminate:
     if (path != NULL) {
