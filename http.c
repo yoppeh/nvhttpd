@@ -33,14 +33,8 @@ static const char *http_response_code_str[] = {
 
 static int io_get_method(http_request_s *request);
 static int io_get_path(http_request_s *request);
+static int io_get_variables(http_request_s *request);
 static int io_next(http_request_s *request);
-static int io_parse_method_connect(http_request_s *request);
-static int io_parse_method_delete(http_request_s *request);
-static int io_parse_method_get(http_request_s *request);
-static int io_parse_method_head(http_request_s *request);
-static int io_parse_method_options(http_request_s *request);
-static int io_parse_method_post_or_put(http_request_s *request);
-static int io_parse_method_trace(http_request_s *request);
 static int io_peek(http_request_s *request);
 static int io_skip_ws(http_request_s *request);
 
@@ -154,6 +148,7 @@ http_request_s *http_request_get(http_client_s *client) {
 
 int http_request_parse(http_request_s *request) {
     debug_enter();
+    int ch;
     if (io_skip_ws(request) != IO_OK) {
         debug_return 1;
     }
@@ -165,6 +160,15 @@ int http_request_parse(http_request_s *request) {
     }
     if (io_get_path(request) != IO_OK) {
         debug_return 1;
+    }
+    ch = io_peek(request);
+    if (ch < IO_OK) {
+        debug_return 1;
+    }
+    if (ch == '?') {
+        if (io_get_variables(request) != IO_OK) {
+            debug_return 1;
+        }
     }
     while (1) {
         int ch;
@@ -228,6 +232,12 @@ static int io_get_method(http_request_s *request) {
         }
         buffer[i] = tolower(ch);
     }
+    ch = io_peek(request);
+    if (ch < IO_OK) {
+        debug_return IO_ERROR;
+    } else if (!isspace(ch)) {
+        debug_return IO_ERROR;
+    }
     if (memcmp(buffer, "connect", 7) == 0) {
         request->method = HTTP_METHOD_CONNECT;
         debug_return IO_OK;
@@ -279,7 +289,7 @@ static int io_get_path(http_request_s *request) {
             }
             path = new_path;
         }
-        if (isspace(ch)) {
+        if (isspace(ch) || ch == '?') {
             break;
         }
         path[path_len++] = ch;
@@ -310,6 +320,29 @@ static int io_get_path(http_request_s *request) {
     }
     free(path);
     debug_return IO_OK;
+}
+
+static int io_get_variables(http_request_s *request) {
+    debug_enter();
+    int ch;
+    if ((ch = io_next(request)) == IO_ERROR) {
+        debug_return ch;
+    }
+    if (ch != '?') {
+        debug_return IO_OK;
+    }
+    if ((ch = io_next(request)) < IO_OK) {
+        debug_return ch;
+    }
+    while (1) {
+        ch = io_peek(request);
+        if (ch < IO_OK) {
+            debug_return ch;
+        }
+        if (ch == ' ') {
+            debug_return IO_OK;
+        }
+    }
 }
 
 static int io_next(http_request_s *request) {
