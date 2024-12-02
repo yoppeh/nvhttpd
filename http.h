@@ -37,6 +37,7 @@ typedef struct http_variable_s {
     char *val;
     struct http_variable_s *next;
 } http_variable_s;
+
 typedef struct http_server_s {
     logger_s *logger;
     int fd;
@@ -53,11 +54,13 @@ typedef struct http_client_s {
 
 typedef struct http_request_s {
     http_client_s *client;
+    char *http_version;
     char *path;
     char *buffer;
     size_t buffer_len;
     size_t buffer_index;
     http_variable_s *url_variables;
+    http_variable_s *headers;
     http_request_method_e method;
 } http_request_s;
 
@@ -71,7 +74,6 @@ extern void http_close(http_server_s *server);
 extern http_server_s *http_init(logger_s *logger, char *server_ip, int port);
 extern void http_request_free(http_request_s *request);
 extern http_request_s *http_request_get(http_client_s *client);
-extern int http_request_parse(http_request_s *request);
 extern char *http_response_header(http_response_code_e code, size_t content_length, const char *mime, const char *additional_headers, size_t *header_len);
 
 #endif // HTTP_H
