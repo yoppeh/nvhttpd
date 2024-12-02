@@ -121,6 +121,7 @@ shutdown:
 
 static void *handle_client_request(void *arg) {
     debug_enter();
+    char *path = NULL;
     if (arg == NULL) {
         debug_return NULL;
     }
@@ -130,7 +131,7 @@ static void *handle_client_request(void *arg) {
     if (request == NULL) {
         goto terminate;
     }
-    char *path = malloc(strlen(html_path) + strlen(request->path) + 1);
+    path = malloc(strlen(html_path) + strlen(request->path) + 1);
     if (path == NULL) {
         logger_error(client->server->logger, "malloc failed: %s", strerror(errno));
         goto terminate;

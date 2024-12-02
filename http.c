@@ -311,6 +311,7 @@ static int io_next(http_request_s *request) {
     debug_enter();
     if (request->buffer_index >= request->buffer_len) {
         request->buffer_len = recv(request->client->fd, request->buffer, BUFFER_SIZE, 0);
+        logger_info(request->client->server->logger, "recv: %*s\n", request->buffer_len, request->buffer);
         if (request->buffer_len < 0) {
             logger_error(request->client->server->logger, "recv failed: %s", strerror(errno));
             debug_return IO_ERROR;
@@ -327,6 +328,7 @@ static int io_peek(http_request_s *request) {
     debug_enter();
     if (request->buffer_index >= request->buffer_len) {
         request->buffer_len = recv(request->client->fd, request->buffer, BUFFER_SIZE, 0);
+        logger_info(request->client->server->logger, "recv: %*s\n", request->buffer_len, request->buffer);
         if (request->buffer_len < 0) {
             logger_error(request->client->server->logger, "recv failed: %s", strerror(errno));
             debug_return IO_ERROR;
