@@ -128,6 +128,7 @@ static void *handle_client_request(void *arg) {
     http_client_s *client = (http_client_s *)arg;
     logger_info(logger, "handling new client connection from %s", client->ip);
     http_request_s *request = http_request_get(client);
+    http_variable_s *var = request->headers;
     if (request == NULL) {
         goto terminate;
     }
@@ -158,7 +159,7 @@ static void *handle_client_request(void *arg) {
         memcpy(path + strlen(html_path), response_404_path, sizeof(response_404_path));
         e = cache_find(path);
         if (e != NULL) {
-        size_t header_len = 0;
+            size_t header_len = 0;
             char * header = http_response_header(HTTP_RESPONSE_404, e->len, e->mime, response_headers, &header_len);
             send(client->fd, header, header_len, 0);
             send(client->fd, e->data, e->len, 0);

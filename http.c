@@ -7,6 +7,7 @@
  * @copyright Copyright (c) 2024
  */
 
+#define MAX_RECV_CHARACTERS 8192
 #define URL_VAR_NAME_MAX 128
 #define URL_VAR_VALUE_MAX 1024
 #define PATH_SIZE_MAX 1024
@@ -34,15 +35,19 @@ static const char *http_response_code_str[] = {
     "404 Not Found"
 };
 
-static int io_add_variable(http_request_s *request, char *var, char *val);
-static int io_get_method(http_request_s *request);
-static int io_get_path(http_request_s *request);
-static int io_get_variables(http_request_s *request);
 static int io_next(http_request_s *request);
-static char *io_parse_url_val(http_request_s *request);
-static char *io_parse_url_var(http_request_s *request);
 static int io_peek(http_request_s *request);
-static int io_skip_ws(http_request_s *request);
+static int req_add_header(http_request_s *request, char *var, char *val);
+static int req_add_variable(http_request_s *request, char *var, char *val);
+static int req_get_headers(http_request_s *request);
+static int req_get_http_ver(http_request_s *request);
+static int req_get_method(http_request_s *request);
+static int req_get_path(http_request_s *request);
+static int req_get_variables(http_request_s *request);
+static int req_parse(http_request_s *request);
+static char *req_parse_url_val(http_request_s *request);
+static char *req_parse_url_var(http_request_s *request, int separator);
+static int req_skip_ws(http_request_s *request);
 
 http_client_s *http_accept(http_server_s *server) {
     debug_enter();
@@ -123,6 +128,32 @@ void http_request_free(http_request_s *request) {
         if (request->buffer) {
             free(request->buffer);
         }
+        if (request->http_version) {
+            free(request->http_version);
+        }
+        if (request->path) {
+            free(request->path);
+        }
+        if (request->url_variables) {
+            http_variable_s *var = request->url_variables;
+            while (var) {
+                http_variable_s *next = var->next;
+                free(var->var);
+                free(var->val);
+                free(var);
+                var = next;
+            }
+        }
+        if (request->headers) {
+            http_variable_s *var = request->headers;
+            while (var) {
+                http_variable_s *next = var->next;
+                free(var->var);
+                free(var->val);
+                free(var);
+                var = next;
+            }
+        }
         free(request);
     }
     debug_return;
@@ -144,67 +175,13 @@ http_request_s *http_request_get(http_client_s *client) {
         free(request);
         debug_return NULL;
     }
-    if (http_request_parse(request) != 0) {
+    if (req_parse(request) != 0) {
         free(request->buffer);
         request->buffer = NULL;
         free(request);
         debug_return NULL;
     }
     debug_return request;
-}
-
-int http_request_parse(http_request_s *request) {
-    debug_enter();
-    int ch;
-    if (io_skip_ws(request) != IO_OK) {
-        debug_return 1;
-    }
-    if (io_get_method(request) != IO_OK) {
-        debug_return 1;
-    }
-    if (io_skip_ws(request) != IO_OK) {
-        debug_return 1;
-    }
-    if (io_get_path(request) != IO_OK) {
-        debug_return 1;
-    }
-    if ((ch = io_peek(request)) < IO_OK) {
-        debug_return 1;
-    }
-    if (ch == '?') {
-        if (io_get_variables(request) != IO_OK) {
-            debug_return 1;
-        }
-    }
-    while (1) {
-        int ch;
-        if ((ch = io_next(request)) == IO_EOF) {
-            debug_return 0;
-        } else if (ch == IO_ERROR) {
-            debug_return 1;
-        } else if (ch == '\r') {
-            if ((ch = io_next(request)) == IO_EOF) {
-                debug_return 0;
-            } else if (ch == IO_ERROR) {
-                debug_return 1;
-            } else if (ch == '\n') {
-                if ((ch = io_next(request)) == IO_EOF) {
-                    debug_return 0;
-                } else if (ch == IO_ERROR) {
-                    debug_return 1;
-                } else if (ch == '\r') {
-                    if ((ch = io_next(request)) == IO_EOF) {
-                        debug_return 0;
-                    } else if (ch == IO_ERROR) {
-                        debug_return 1;
-                    } else if (ch == '\n') {
-                        debug_return 0;
-                    }
-                }
-            }
-        }
-    }
-    debug_return 0;
 }
 
 char *http_response_header(http_response_code_e code, size_t content_length, const char *mime, const char *additional_headers, size_t *header_len) {
@@ -220,7 +197,52 @@ char *http_response_header(http_response_code_e code, size_t content_length, con
     debug_return strdup(header);
 }
 
-static int io_add_variable(http_request_s *request, char *var, char *val) {
+static int io_next(http_request_s *request) {
+    if (request->buffer_index >= request->buffer_len) {
+        request->buffer_len = recv(request->client->fd, request->buffer, BUFFER_SIZE, 0);
+        if (request->buffer_len < 0) {
+            logger_error(request->client->server->logger, "recv failed: %s", strerror(errno));
+            return IO_ERROR;
+        }
+        if (request->buffer_len == 0) {
+            return IO_EOF;
+        }
+        request->buffer_index = 0;
+    }
+    return request->buffer[request->buffer_index++];
+}
+
+static int io_peek(http_request_s *request) {
+    if (request->buffer_index >= request->buffer_len) {
+        request->buffer_len = recv(request->client->fd, request->buffer, BUFFER_SIZE, 0);
+        if (request->buffer_len < 0) {
+            logger_error(request->client->server->logger, "recv failed: %s", strerror(errno));
+            return IO_ERROR;
+        }
+        if (request->buffer_len == 0) {
+            return IO_EOF;
+        }
+        request->buffer_index = 0;
+    }
+    return request->buffer[request->buffer_index];
+}
+
+static int req_add_header(http_request_s *request, char *var, char *val) {
+    debug_enter();
+    http_variable_s *variable = malloc(sizeof(http_variable_s));
+    if (variable == NULL) {
+        logger_error(request->client->server->logger, "malloc failed: %s", strerror(errno));
+        debug_return IO_ERROR;
+    }
+    variable->var = var;
+    variable->val = val;
+    variable->next = request->headers;
+    request->headers = variable;
+    debug("added header %s = %s\n", var, val);
+    debug_return IO_OK;
+}
+
+static int req_add_variable(http_request_s *request, char *var, char *val) {
     debug_enter();
     http_variable_s *variable = malloc(sizeof(http_variable_s));
     if (variable == NULL) {
@@ -235,7 +257,88 @@ static int io_add_variable(http_request_s *request, char *var, char *val) {
     debug_return IO_OK;
 }
 
-static int io_get_method(http_request_s *request) {
+static int req_get_headers(http_request_s *request) {
+    debug_enter();
+    int ch;
+    while (1) {
+        if ((ch = io_peek(request)) < IO_OK) {
+            debug_return ch;
+        }
+        if (ch == '\r') {
+            break;
+        }
+        char *var = req_parse_url_var(request, ':');
+        if (var == NULL) {
+            return IO_ERROR;
+        }
+        if ((ch = io_peek(request)) != ':') {
+            debug_return IO_ERROR;
+        }
+        if ((ch = io_next(request)) < IO_OK) {
+            debug_return ch;
+        }
+        if ((ch = req_skip_ws(request)) < IO_OK) {
+            debug_return ch;
+        }
+        char *val = req_parse_url_val(request);
+        if (val == NULL) {
+            return IO_ERROR;
+        }
+        if (req_add_header(request, var, val) != IO_OK) {
+            free(var);
+            free(val);
+            return IO_ERROR;
+        }
+        if ((ch = io_peek(request)) == '\r') {
+            if ((ch = io_next(request)) < IO_OK) {
+                debug_return ch;
+            }
+            if ((ch = io_peek(request)) == '\n') {
+                if ((ch = io_next(request)) < IO_OK) {
+                    debug_return ch;
+                }
+            } else if (ch < IO_OK) {
+                debug_return ch;
+            }
+        } else if (ch < IO_OK) {
+            debug_return ch;
+        }
+    }
+    debug_return IO_OK;
+}
+
+static int req_get_http_ver(http_request_s *request) {
+    debug_enter();
+    int ch;
+    int i;
+    char buffer[32];
+    for (i = 0; i < 32; i++) {
+        if ((ch = io_peek(request)) < IO_OK) {
+            debug_return IO_ERROR;
+        }
+        if (isspace(ch)) {
+            buffer[i] = 0;
+            break;
+        }
+        ch = io_next(request);
+        if (ch < IO_OK) {
+            debug_return IO_ERROR;
+        }
+        buffer[i] = tolower(ch);
+    }
+    buffer[i] = 0;
+    if (memcmp(buffer, "http/", 5) == 0) {
+        if ((request->http_version = strdup(buffer + 5)) == NULL) {
+            logger_error(request->client->server->logger, "strdup failed: %s", strerror(errno));
+            debug_return IO_ERROR;
+        }
+        debug("http version: %s\n", request->http_version);
+        debug_return IO_OK;
+    }
+    debug_return IO_ERROR;
+}
+
+static int req_get_method(http_request_s *request) {
     debug_enter();
     int ch;
     char buffer[8];
@@ -287,7 +390,7 @@ static int io_get_method(http_request_s *request) {
     debug_return IO_ERROR;
 }
 
-static int io_get_path(http_request_s *request) {
+static int req_get_path(http_request_s *request) {
     debug_enter();
     static const char index_html_str[] = "index.html";
     char *path = malloc(BUFFER_SIZE);
@@ -348,7 +451,7 @@ static int io_get_path(http_request_s *request) {
     debug_return IO_OK;
 }
 
-static int io_get_variables(http_request_s *request) {
+static int req_get_variables(http_request_s *request) {
     debug_enter();
     int ch;
     if ((ch = io_next(request)) == IO_ERROR) {
@@ -364,7 +467,7 @@ static int io_get_variables(http_request_s *request) {
         if (isspace(ch)) {
             debug_return IO_OK;
         }
-        char *var = io_parse_url_var(request);
+        char *var = req_parse_url_var(request, '=');
         if (var == NULL) {
             return IO_ERROR;
         }
@@ -374,11 +477,11 @@ static int io_get_variables(http_request_s *request) {
         if ((ch = io_next(request)) < IO_OK) {
             debug_return ch;
         }
-        char *val = io_parse_url_val(request);
+        char *val = req_parse_url_val(request);
         if (val == NULL) {
             return IO_ERROR;
         }
-        if (io_add_variable(request, var, val) != IO_OK) {
+        if (req_add_variable(request, var, val) != IO_OK) {
             free(var);
             free(val);
             return IO_ERROR;
@@ -394,23 +497,79 @@ static int io_get_variables(http_request_s *request) {
     debug_return IO_OK;
 }
 
-static int io_next(http_request_s *request) {
-    if (request->buffer_index >= request->buffer_len) {
-        request->buffer_len = recv(request->client->fd, request->buffer, BUFFER_SIZE, 0);
-        logger_info(request->client->server->logger, "recv: %*s\n", request->buffer_len, request->buffer);
-        if (request->buffer_len < 0) {
-            logger_error(request->client->server->logger, "recv failed: %s", strerror(errno));
-            return IO_ERROR;
-        }
-        if (request->buffer_len == 0) {
-            return IO_EOF;
-        }
-        request->buffer_index = 0;
+static int req_parse(http_request_s *request) {
+    debug_enter();
+    int ch;
+    if (req_skip_ws(request) != IO_OK) {
+        debug_return 1;
     }
-    return request->buffer[request->buffer_index++];
+    if (req_get_method(request) != IO_OK) {
+        debug_return 1;
+    }
+    if (req_skip_ws(request) != IO_OK) {
+        debug_return 1;
+    }
+    if (req_get_path(request) != IO_OK) {
+        debug_return 1;
+    }
+    if ((ch = io_peek(request)) < IO_OK) {
+        debug_return 1;
+    }
+    if (ch == '?') {
+        if (req_get_variables(request) != IO_OK) {
+            debug_return 1;
+        }
+    }
+    if (req_skip_ws(request) != IO_OK) {
+        debug_return 1;
+    }
+    if ((ch = io_peek(request)) < IO_OK) {
+        debug_return 1;
+    }
+    if (req_get_http_ver(request) != IO_OK) {
+        debug_return 1;
+    }
+    for (size_t i = MAX_RECV_CHARACTERS; i; i--) {
+        if ((ch = io_peek(request)) < IO_OK) {
+            debug_return 1;
+        }
+        if (ch == '\r') {
+            break;
+        }
+        if (!isspace(ch)) {
+            debug_return 1;
+        }
+        if (ch = io_next(request) < IO_OK) {
+            debug_return 1;
+        }
+    }
+    if ((ch = io_next(request)) < IO_OK) {
+        debug_return 1;
+    }
+    if ((ch = io_next(request)) < IO_OK) {
+        debug_return 1;
+    }
+    if (ch == '\n') {
+        if (req_get_headers(request) != IO_OK) {
+            debug_return 1;
+        }
+    }
+    if ((ch = io_next(request)) < IO_OK) {
+        debug_return 1;
+    }
+    if (ch != '\r') {
+        debug_return 1;
+    }
+    if ((ch = io_next(request)) < IO_OK) {
+        debug_return 1;
+    }
+    if (ch != '\n') {
+        debug_return 1;
+    }
+    debug_return 0;
 }
 
-static char *io_parse_url_val(http_request_s *request) {
+static char *req_parse_url_val(http_request_s *request) {
     int ch;
     char *ret = NULL;
     char *val = malloc(BUFFER_SIZE);
@@ -436,7 +595,7 @@ static char *io_parse_url_val(http_request_s *request) {
             }
             val = new_val;
         }
-        if (ch == '&' || isspace(ch)) {
+        if (ch == '&' || ch == '\r') {
             break;
         }
         if ((ch = io_next(request)) < IO_OK) {
@@ -455,20 +614,20 @@ static char *io_parse_url_val(http_request_s *request) {
     return ret;
 }
 
-static char *io_parse_url_var(http_request_s *request) {
+static char *req_parse_url_var(http_request_s *request, int separator) {
     int ch;
     char *ret = NULL;
     char *var = malloc(BUFFER_SIZE);
     size_t var_size = BUFFER_SIZE;
     size_t var_len = 0;
     while (1) {
-        if ((ch = io_peek(request)) < IO_OK || isspace(ch)) {
+        if ((ch = io_peek(request)) < IO_OK || (isspace(ch) && separator != ':')) {
             free(var);
             return NULL;
         }
         if (var_len >= var_size) {
             if (var_size >= URL_VAR_NAME_MAX) {
-                logger_error(request->client->server->logger, "url variable name too long > %d bytes", var_len);
+                logger_error(request->client->server->logger, "url variable/header name too long > %d bytes", var_len);
                 free(var);
                 return NULL;
             }
@@ -481,7 +640,7 @@ static char *io_parse_url_var(http_request_s *request) {
             }
             var = new_var;
         }
-        if (ch == '=') {
+        if (ch == separator) {
             break;
         }
         if ((ch = io_next(request)) < IO_OK) {
@@ -500,23 +659,7 @@ static char *io_parse_url_var(http_request_s *request) {
     return ret;
 }
 
-static int io_peek(http_request_s *request) {
-    if (request->buffer_index >= request->buffer_len) {
-        request->buffer_len = recv(request->client->fd, request->buffer, BUFFER_SIZE, 0);
-        logger_info(request->client->server->logger, "recv: %*s\n", request->buffer_len, request->buffer);
-        if (request->buffer_len < 0) {
-            logger_error(request->client->server->logger, "recv failed: %s", strerror(errno));
-            return IO_ERROR;
-        }
-        if (request->buffer_len == 0) {
-            return IO_EOF;
-        }
-        request->buffer_index = 0;
-    }
-    return request->buffer[request->buffer_index];
-}
-
-static int io_skip_ws(http_request_s *request) {
+static int req_skip_ws(http_request_s *request) {
     debug_enter();
     while (1) {
         int c = io_peek(request);
