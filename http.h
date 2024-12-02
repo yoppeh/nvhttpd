@@ -51,6 +51,7 @@ typedef struct http_request_s {
     char *path;
     char *buffer;
     size_t buffer_len;
+    size_t buffer_index;
     http_request_method_e method;
 } http_request_s;
 
