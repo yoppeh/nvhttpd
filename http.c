@@ -7,7 +7,10 @@
  * @copyright Copyright (c) 2024
  */
 
-#define BUFFER_SIZE 1024
+#define URL_VAR_NAME_MAX 128
+#define URL_VAR_VALUE_MAX 1024
+#define PATH_SIZE_MAX 1024
+#define BUFFER_SIZE 512
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -31,10 +34,13 @@ static const char *http_response_code_str[] = {
     "404 Not Found"
 };
 
+static int io_add_variable(http_request_s *request, char *var, char *val);
 static int io_get_method(http_request_s *request);
 static int io_get_path(http_request_s *request);
 static int io_get_variables(http_request_s *request);
 static int io_next(http_request_s *request);
+static char *io_parse_url_val(http_request_s *request);
+static char *io_parse_url_var(http_request_s *request);
 static int io_peek(http_request_s *request);
 static int io_skip_ws(http_request_s *request);
 
@@ -132,6 +138,7 @@ http_request_s *http_request_get(http_client_s *client) {
     }
     request->client = client;
     request->buffer = malloc(BUFFER_SIZE);
+    request->url_variables = NULL;
     if (request->buffer == NULL) {
         logger_error(server->logger, "malloc failed: %s", strerror(errno));
         free(request);
@@ -161,8 +168,7 @@ int http_request_parse(http_request_s *request) {
     if (io_get_path(request) != IO_OK) {
         debug_return 1;
     }
-    ch = io_peek(request);
-    if (ch < IO_OK) {
+    if ((ch = io_peek(request)) < IO_OK) {
         debug_return 1;
     }
     if (ch == '?') {
@@ -214,6 +220,21 @@ char *http_response_header(http_response_code_e code, size_t content_length, con
     debug_return strdup(header);
 }
 
+static int io_add_variable(http_request_s *request, char *var, char *val) {
+    debug_enter();
+    http_variable_s *variable = malloc(sizeof(http_variable_s));
+    if (variable == NULL) {
+        logger_error(request->client->server->logger, "malloc failed: %s", strerror(errno));
+        debug_return IO_ERROR;
+    }
+    variable->var = var;
+    variable->val = val;
+    variable->next = request->url_variables;
+    request->url_variables = variable;
+    debug("added url variable %s = %s\n", var, val);
+    debug_return IO_OK;
+}
+
 static int io_get_method(http_request_s *request) {
     debug_enter();
     int ch;
@@ -250,7 +271,7 @@ static int io_get_method(http_request_s *request) {
     } else if (memcmp(buffer, "head", 4) == 0) {
         request->method = HTTP_METHOD_HEAD;
         debug_return IO_OK;
-    } else if (memcmp(buffer, "option", 6) == 0) {
+    } else if (memcmp(buffer, "options", 7) == 0) {
         request->method = HTTP_METHOD_OPTIONS;
         debug_return IO_OK;
     } else if (memcmp(buffer, "post", 4) == 0) {
@@ -280,6 +301,11 @@ static int io_get_path(http_request_s *request) {
             debug_return ch;
         }
         if (path_len >= path_size) {
+            if (path_size >= PATH_SIZE_MAX) {
+                logger_error(request->client->server->logger, "path too long > %d bytes", path_len);
+                free(path);
+                debug_return IO_ERROR;
+            }
             path_size <<= 1;
             char *new_path = realloc(path, path_size);
             if (new_path == NULL) {
@@ -331,52 +357,163 @@ static int io_get_variables(http_request_s *request) {
     if (ch != '?') {
         debug_return IO_OK;
     }
-    if ((ch = io_next(request)) < IO_OK) {
-        debug_return ch;
-    }
     while (1) {
-        ch = io_peek(request);
-        if (ch < IO_OK) {
+        if ((ch = io_peek(request)) < IO_OK) {
             debug_return ch;
         }
-        if (ch == ' ') {
+        if (isspace(ch)) {
             debug_return IO_OK;
         }
+        char *var = io_parse_url_var(request);
+        if (var == NULL) {
+            return IO_ERROR;
+        }
+        if ((ch = io_peek(request)) != '=') {
+            debug_return IO_ERROR;
+        }
+        if ((ch = io_next(request)) < IO_OK) {
+            debug_return ch;
+        }
+        char *val = io_parse_url_val(request);
+        if (val == NULL) {
+            return IO_ERROR;
+        }
+        if (io_add_variable(request, var, val) != IO_OK) {
+            free(var);
+            free(val);
+            return IO_ERROR;
+        }
+        if ((ch = io_peek(request)) == '&') {
+            if ((ch = io_next(request)) < IO_OK) {
+                debug_return ch;
+            }
+        } else if (ch < IO_OK) {
+            debug_return ch;
+        }
     }
+    debug_return IO_OK;
 }
 
 static int io_next(http_request_s *request) {
-    debug_enter();
     if (request->buffer_index >= request->buffer_len) {
         request->buffer_len = recv(request->client->fd, request->buffer, BUFFER_SIZE, 0);
         logger_info(request->client->server->logger, "recv: %*s\n", request->buffer_len, request->buffer);
         if (request->buffer_len < 0) {
             logger_error(request->client->server->logger, "recv failed: %s", strerror(errno));
-            debug_return IO_ERROR;
+            return IO_ERROR;
         }
         if (request->buffer_len == 0) {
-            debug_return IO_EOF;
+            return IO_EOF;
         }
         request->buffer_index = 0;
     }
-    debug_return request->buffer[request->buffer_index++];
+    return request->buffer[request->buffer_index++];
+}
+
+static char *io_parse_url_val(http_request_s *request) {
+    int ch;
+    char *ret = NULL;
+    char *val = malloc(BUFFER_SIZE);
+    size_t val_size = BUFFER_SIZE;
+    size_t val_len = 0;
+    while (1) {
+        if ((ch = io_peek(request)) < IO_OK) {
+            free(val);
+            return NULL;
+        }
+        if (val_len >= val_size) {
+            if (val_size >= URL_VAR_VALUE_MAX) {
+                logger_error(request->client->server->logger, "url variable value too long > %d bytes", val_len);
+                free(val);
+                return NULL;
+            }
+            val_size <<= 1;
+            char *new_val = realloc(val, val_size);
+            if (new_val == NULL) {
+                logger_error(request->client->server->logger, "realloc failed: %s", strerror(errno));
+                free(val);
+                return NULL;
+            }
+            val = new_val;
+        }
+        if (ch == '&' || isspace(ch)) {
+            break;
+        }
+        if ((ch = io_next(request)) < IO_OK) {
+            free(val);
+            return NULL;
+        }
+        val[val_len++] = ch;
+    }
+    val[val_len] = 0;
+    if ((ret = strdup(val)) == NULL) {
+        logger_error(request->client->server->logger, "strdup failed: %s", strerror(errno));
+        free(val);
+        return NULL;
+    }
+    free(val);
+    return ret;
+}
+
+static char *io_parse_url_var(http_request_s *request) {
+    int ch;
+    char *ret = NULL;
+    char *var = malloc(BUFFER_SIZE);
+    size_t var_size = BUFFER_SIZE;
+    size_t var_len = 0;
+    while (1) {
+        if ((ch = io_peek(request)) < IO_OK || isspace(ch)) {
+            free(var);
+            return NULL;
+        }
+        if (var_len >= var_size) {
+            if (var_size >= URL_VAR_NAME_MAX) {
+                logger_error(request->client->server->logger, "url variable name too long > %d bytes", var_len);
+                free(var);
+                return NULL;
+            }
+            var_size <<= 1;
+            char *new_var = realloc(var, var_size);
+            if (new_var == NULL) {
+                logger_error(request->client->server->logger, "realloc failed: %s", strerror(errno));
+                free(var);
+                return NULL;
+            }
+            var = new_var;
+        }
+        if (ch == '=') {
+            break;
+        }
+        if ((ch = io_next(request)) < IO_OK) {
+            free(var);
+            return NULL;
+        }
+        var[var_len++] = ch;
+    }
+    var[var_len] = 0;
+    if ((ret = strdup(var)) == NULL) {
+        logger_error(request->client->server->logger, "strdup failed: %s", strerror(errno));
+        free(var);
+        return NULL;
+    }
+    free(var);
+    return ret;
 }
 
 static int io_peek(http_request_s *request) {
-    debug_enter();
     if (request->buffer_index >= request->buffer_len) {
         request->buffer_len = recv(request->client->fd, request->buffer, BUFFER_SIZE, 0);
         logger_info(request->client->server->logger, "recv: %*s\n", request->buffer_len, request->buffer);
         if (request->buffer_len < 0) {
             logger_error(request->client->server->logger, "recv failed: %s", strerror(errno));
-            debug_return IO_ERROR;
+            return IO_ERROR;
         }
         if (request->buffer_len == 0) {
-            debug_return IO_EOF;
+            return IO_EOF;
         }
         request->buffer_index = 0;
     }
-    debug_return request->buffer[request->buffer_index];
+    return request->buffer[request->buffer_index];
 }
 
 static int io_skip_ws(http_request_s *request) {
