@@ -32,6 +32,11 @@ typedef enum http_response_code_e {
     HTTP_RESPONSE_404 = 1
 } http_response_code_e;
 
+typedef struct http_variable_s {
+    char *var;
+    char *val;
+    struct http_variable_s *next;
+} http_variable_s;
 typedef struct http_server_s {
     logger_s *logger;
     int fd;
@@ -52,6 +57,7 @@ typedef struct http_request_s {
     char *buffer;
     size_t buffer_len;
     size_t buffer_index;
+    http_variable_s *url_variables;
     http_request_method_e method;
 } http_request_s;
 
