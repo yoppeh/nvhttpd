@@ -22,10 +22,27 @@
 #include "http.h"
 #include "logger.h"
 
+static const int IO_OK = 0;
+static const int IO_EOF = -1;
+static const int IO_ERROR = -2;
+
 static const char *http_response_code_str[] = {
     "200 OK",
     "404 Not Found"
 };
+
+static int io_get_method(http_request_s *request);
+static int io_get_path(http_request_s *request);
+static int io_next(http_request_s *request);
+static int io_parse_method_connect(http_request_s *request);
+static int io_parse_method_delete(http_request_s *request);
+static int io_parse_method_get(http_request_s *request);
+static int io_parse_method_head(http_request_s *request);
+static int io_parse_method_options(http_request_s *request);
+static int io_parse_method_post_or_put(http_request_s *request);
+static int io_parse_method_trace(http_request_s *request);
+static int io_peek(http_request_s *request);
+static int io_skip_ws(http_request_s *request);
 
 http_client_s *http_accept(http_server_s *server) {
     debug_enter();
@@ -122,13 +139,6 @@ http_request_s *http_request_get(http_client_s *client) {
         free(request);
         debug_return NULL;
     }
-    request->buffer_len = recv(client->fd, request->buffer, BUFFER_SIZE, 0);
-    if (request->buffer_len < 0) {
-        logger_error(server->logger, "recv failed: %s", strerror(errno));
-        free(request->buffer);
-        free(request);
-        debug_return NULL;
-    }
     if (http_request_parse(request) != 0) {
         free(request->buffer);
         free(request);
@@ -139,61 +149,45 @@ http_request_s *http_request_get(http_client_s *client) {
 
 int http_request_parse(http_request_s *request) {
     debug_enter();
-    static const char index_html_str[] = "index.html";
-    char *start;
-    char *req = request->buffer;
-    while (*req && isspace(*req)) {
-        req++;
-    }
-    if (*req == 0) {
-        debug_return 0;
-    }
-    if (memcmp(req, "CONNECT", 7) == 0) {
-        request->method = HTTP_METHOD_CONNECT;
-        req += 7;
-    } else if (memcmp(req, "DELETE", 6) == 0) {
-        request->method = HTTP_METHOD_DELETE;
-        req += 6;
-    } else if (memcmp(req, "GET", 3) == 0) {
-        request->method = HTTP_METHOD_GET;
-        req += 3;
-    } else if (memcmp(req, "HEAD", 4) == 0) {
-        request->method = HTTP_METHOD_HEAD;
-        req += 4;
-    } else if (memcpy(req, "OPTIONS", 7) == 0) {
-        request->method = HTTP_METHOD_OPTIONS;
-        req += 7;
-    } else if (memcmp(req, "POST", 4) == 0) {
-        request->method = HTTP_METHOD_POST;
-        req += 4;
-    } else if (memcmp(req, "PUT", 3) == 0) {
-        request->method = HTTP_METHOD_PUT;
-        req += 3;
-    } else if (memcmp(req, "TRACE", 5) == 0) {
-        request->method = HTTP_METHOD_TRACE;
-        req += 5;
-    } else {
+    if (io_skip_ws(request) != IO_OK) {
         debug_return 1;
     }
-    while (*req && isspace(*req)) {
-        req++;
-    }
-    start = req;
-    while (*req && !isspace(*req) && *req != '?') {
-        req++;
-    }
-    if (*req == 0) {
+    if (io_get_method(request) != IO_OK) {
         debug_return 1;
     }
-    request->path = malloc((req - start) + sizeof(index_html_str));
-    if (request->path == NULL) {
-        logger_error(request->client->server->logger, "malloc failed: %s", strerror(errno));
+    if (io_skip_ws(request) != IO_OK) {
         debug_return 1;
     }
-    memcpy(request->path, start, req - start);
-    request->path[req - start] = 0;
-    if (request->path[req - start - 1] == '/') {
-        memcpy(request->path + (req - start), index_html_str, sizeof(index_html_str));
+    if (io_get_path(request) != IO_OK) {
+        debug_return 1;
+    }
+    while (1) {
+        int ch;
+        if ((ch = io_next(request)) == IO_EOF) {
+            debug_return 0;
+        } else if (ch == IO_ERROR) {
+            debug_return 1;
+        } else if (ch == '\r') {
+            if ((ch = io_next(request)) == IO_EOF) {
+                debug_return 0;
+            } else if (ch == IO_ERROR) {
+                debug_return 1;
+            } else if (ch == '\n') {
+                if ((ch = io_next(request)) == IO_EOF) {
+                    debug_return 0;
+                } else if (ch == IO_ERROR) {
+                    debug_return 1;
+                } else if (ch == '\r') {
+                    if ((ch = io_next(request)) == IO_EOF) {
+                        debug_return 0;
+                    } else if (ch == IO_ERROR) {
+                        debug_return 1;
+                    } else if (ch == '\n') {
+                        debug_return 0;
+                    }
+                }
+            }
+        }
     }
     debug_return 0;
 }
@@ -209,4 +203,152 @@ char *http_response_header(http_response_code_e code, size_t content_length, con
     char header[1024];
     *header_len = sprintf(header, "HTTP/1.1 %s\r\nDate: %s\r\nContent-Type: %s\r\nContent-Length: %ld\r\n%s\r\n", http_response_code_str[code], date_str, mime, content_length, additional_headers);
     debug_return strdup(header);
+}
+
+static int io_get_method(http_request_s *request) {
+    debug_enter();
+    int ch;
+    char buffer[8];
+    for (int i = 0; i < 8; i++) {
+        if ((ch = io_peek(request)) < IO_OK) {
+            debug_return IO_ERROR;
+        }
+        if (isspace(ch)) {
+            buffer[i] = 0;
+            break;
+        }
+        ch = io_next(request);
+        if (ch < IO_OK) {
+            debug_return IO_ERROR;
+        }
+        buffer[i] = tolower(ch);
+    }
+    if (memcmp(buffer, "connect", 7) == 0) {
+        request->method = HTTP_METHOD_CONNECT;
+        debug_return IO_OK;
+    } else if (memcmp(buffer, "delete", 6) == 0) {
+        request->method = HTTP_METHOD_DELETE;
+        debug_return IO_OK;
+    } else if (memcmp(buffer, "get", 3) == 0) {
+        request->method = HTTP_METHOD_GET;
+        debug_return IO_OK;
+    } else if (memcmp(buffer, "head", 4) == 0) {
+        request->method = HTTP_METHOD_HEAD;
+        debug_return IO_OK;
+    } else if (memcmp(buffer, "option", 6) == 0) {
+        request->method = HTTP_METHOD_OPTIONS;
+        debug_return IO_OK;
+    } else if (memcmp(buffer, "post", 4) == 0) {
+        request->method = HTTP_METHOD_POST;
+        debug_return IO_OK;
+    } else if (memcmp(buffer, "put", 3) == 0) {
+        request->method = HTTP_METHOD_PUT;
+        debug_return IO_OK;
+    } else if (memcmp(buffer, "trace", 5) == 0) {
+        request->method = HTTP_METHOD_TRACE;
+        debug_return IO_OK;
+    }
+    debug_return IO_ERROR;
+}
+
+static int io_get_path(http_request_s *request) {
+    debug_enter();
+    static const char index_html_str[] = "index.html";
+    char *path = malloc(BUFFER_SIZE);
+    size_t path_size = BUFFER_SIZE;
+    size_t path_len = 0;
+    int ch;
+    while (1) {
+        ch = io_peek(request);
+        if (ch < IO_OK) {
+            free(path);
+            debug_return ch;
+        }
+        if (path_len >= path_size) {
+            path_size <<= 1;
+            char *new_path = realloc(path, path_size);
+            if (new_path == NULL) {
+                logger_error(request->client->server->logger, "realloc failed: %s", strerror(errno));
+                free(path);
+                debug_return IO_ERROR;
+            }
+            path = new_path;
+        }
+        if (isspace(ch)) {
+            break;
+        }
+        path[path_len++] = ch;
+        ch = io_next(request);
+        if (ch < IO_OK) {
+            free(path);
+            debug_return ch;
+        }
+    }
+    path[path_len] = 0;
+    if (path[path_len - 1] == '/') {
+        if (path_len + sizeof(index_html_str) > path_size) {
+            path_size = path_len + sizeof(index_html_str);
+            char *new_path = realloc(path, path_size);
+            if (new_path == NULL) {
+                logger_error(request->client->server->logger, "realloc failed: %s", strerror(errno));
+                free(path);
+                debug_return IO_ERROR;
+            }
+            path = new_path;
+        }
+        strcat(path, index_html_str);
+    }
+    if ((request->path = strdup(path)) == NULL) {
+        logger_error(request->client->server->logger, "strdup failed: %s", strerror(errno));
+        free(path);
+        debug_return IO_ERROR;
+    }
+    free(path);
+    debug_return IO_OK;
+}
+
+static int io_next(http_request_s *request) {
+    debug_enter();
+    if (request->buffer_index >= request->buffer_len) {
+        request->buffer_len = recv(request->client->fd, request->buffer, BUFFER_SIZE, 0);
+        if (request->buffer_len < 0) {
+            logger_error(request->client->server->logger, "recv failed: %s", strerror(errno));
+            debug_return IO_ERROR;
+        }
+        if (request->buffer_len == 0) {
+            debug_return IO_EOF;
+        }
+        request->buffer_index = 0;
+    }
+    debug_return request->buffer[request->buffer_index++];
+}
+
+static int io_peek(http_request_s *request) {
+    debug_enter();
+    if (request->buffer_index >= request->buffer_len) {
+        request->buffer_len = recv(request->client->fd, request->buffer, BUFFER_SIZE, 0);
+        if (request->buffer_len < 0) {
+            logger_error(request->client->server->logger, "recv failed: %s", strerror(errno));
+            debug_return IO_ERROR;
+        }
+        if (request->buffer_len == 0) {
+            debug_return IO_EOF;
+        }
+        request->buffer_index = 0;
+    }
+    debug_return request->buffer[request->buffer_index];
+}
+
+static int io_skip_ws(http_request_s *request) {
+    debug_enter();
+    while (1) {
+        int c = io_peek(request);
+        if (c < 0) {
+            debug_return c;
+        }
+        if (!isspace(c)) {
+            debug_return IO_OK;
+        }
+        io_next(request);
+    }
 }
