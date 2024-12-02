@@ -119,8 +119,12 @@ http_server_s *http_init(logger_s *logger, char *server_ip, int port) {
 
 void http_request_free(http_request_s *request) {
     debug_enter();
-    free(request->buffer);
-    free(request);
+    if (request) {
+        if (request->buffer) {
+            free(request->buffer);
+        }
+        free(request);
+    }
     debug_return;
 }
 
@@ -141,6 +145,7 @@ http_request_s *http_request_get(http_client_s *client) {
     }
     if (http_request_parse(request) != 0) {
         free(request->buffer);
+        request->buffer = NULL;
         free(request);
         debug_return NULL;
     }
