@@ -20,6 +20,8 @@
 #include "debug.h"
 #include "http.h"
 #include "logger.h"
+#include "request.h"
+#include "response.h"
 
 #define log_file_def stdout
 
@@ -127,7 +129,7 @@ static void *handle_client_request(void *arg) {
     }
     http_client_s *client = (http_client_s *)arg;
     logger_info(logger, "handling new client connection from %s", client->ip);
-    http_request_s *request = http_request_get(client);
+    request_s *request = request_get(client);
     http_variable_s *var = request->headers;
     if (request == NULL) {
         goto terminate;
@@ -169,7 +171,7 @@ terminate:
     if (path != NULL) {
         free(path);
     }
-    http_request_free(request);
+    request_free(request);
     http_client_close(client);
     debug_return NULL;
 }
