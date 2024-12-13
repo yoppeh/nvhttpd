@@ -50,7 +50,7 @@ ifeq ($(prefix),)
 endif
 
 EXES = nvhttpd
-OBJS = main.o cache.o config.o debug.o http.o logger.o request.o response.o
+OBJS = main.o cache.o config.o debug.o http.o log.o request.o response.o
 
 .PHONY: all bear clean install uninstall
 
@@ -73,11 +73,11 @@ endif
 cache.o: cache.c cache.h debug.h
 config.o: config.c config.h debug.h
 debug.o: debug.c debug.h
-http.o: http.c debug.h http.h logger.h
-logger.o: logger.c logger.h
-main.o: main.c cache.h debug.h http.h logger.h request.h response.h
-request.o: request.c debug.h http.h logger.h request.h
-response.o: response.c debug.h http.h logger.h request.h response.h
+http.o: http.c debug.h http.h log.h
+log.o: log.c log.h
+main.o: main.c cache.h debug.h http.h log.h request.h response.h
+request.o: request.c debug.h http.h log.h request.h
+response.o: response.c debug.h http.h log.h request.h response.h
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

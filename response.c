@@ -15,9 +15,12 @@
 #include "request.h"
 #include "response.h"
 
-static const char *http_response_code_str[] = {
+const char const *response_code_str[] = {
     "200 OK",
-    "404 Not Found"
+    "400 Bad Request",
+    "404 Not Found",
+    "500 Internal Server Error",
+    "501 Not Implemented",
 };
 
 char *http_response_header(http_response_code_e code, size_t content_length, const char *mime, const char *additional_headers, size_t *header_len) {
@@ -29,6 +32,6 @@ char *http_response_header(http_response_code_e code, size_t content_length, con
     timeinfo = gmtime(&rawtime);
     strftime(date_str, sizeof(date_str), "%a, %d %b %Y %H:%M:%S GMT", timeinfo);
     char header[1024];
-    *header_len = sprintf(header, "HTTP/1.1 %s\r\nDate: %s\r\nContent-Type: %s\r\nContent-Length: %ld\r\n%s\r\n", http_response_code_str[code], date_str, mime, content_length, additional_headers);
+    *header_len = sprintf(header, "HTTP/1.1 %s\r\nDate: %s\r\nContent-Type: %s\r\nContent-Length: %ld\r\n%s\r\n", response_code_str[code], date_str, mime, content_length, additional_headers);
     debug_return strdup(header);
 }
