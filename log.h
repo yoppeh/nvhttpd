@@ -47,9 +47,9 @@ typedef enum log_levels_e {
  * log_cleanup() when it is no longer needed.
  */
 typedef struct log_s {
+    struct log_queue_s *queue;
 	log_levels_e log_level;
 	pid_t pid;
-    pid_t tid;
 	const char *app_name;
 	size_t app_name_len;
     FILE *fs;
