@@ -12,6 +12,8 @@
 
 #include <time.h>
 
+#include "log.h"
+
 /**
  * @brief Represents an element in the cache. The hash is the FULL hash of 
  * the key, meaning it is the result of the hash function applied to the entire
@@ -21,6 +23,7 @@
  * responsibility of the user.
  */
 typedef struct cache_element_s {
+    int watch_descriptor;
     size_t hash;
     size_t len;
     const char *path;
@@ -44,8 +47,9 @@ extern void cache_free(void);
 
 /**
  * @brief Initializes the cache.
+ * @param log Handle for logging.
  * @return 0 on success, 1 on no memory.
  */
-extern int cache_init(void);
+extern int cache_init(log_s *log);
 
 #endif // CACHE_H

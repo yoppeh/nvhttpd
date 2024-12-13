@@ -71,7 +71,7 @@ int main(int argc, char *argv[]) {
         goto shutdown;
     }
     log_info(log, "starting up server");
-    if (cache_init() != 0) {
+    if (cache_init(log) != 0) {
         log_error(log, "cache initialization failed");
         goto shutdown;
     }
