@@ -201,7 +201,10 @@ static void *handle_client_request(void *arg) {
     size_t header_len = 0;
     size_t data_len = (request->method == REQUEST_METHOD_GET) ? e->len : 0;
     char *header = http_response_header(code, data_len, e->mime, response_headers, &header_len);
-    send(client->fd, header, header_len, 0);
+    if (header != NULL) {
+        send(client->fd, header, header_len, 0);
+        free(header);
+    }
     if (request->method == REQUEST_METHOD_GET) {
         send(client->fd, e->data, e->len, 0);
     }

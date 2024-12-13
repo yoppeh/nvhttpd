@@ -10,6 +10,8 @@
 #ifndef CACHE_H
 #define CACHE_H
 
+#include <time.h>
+
 /**
  * @brief Represents an element in the cache. The hash is the FULL hash of 
  * the key, meaning it is the result of the hash function applied to the entire
