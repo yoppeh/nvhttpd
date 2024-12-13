@@ -7,9 +7,11 @@
  * @copyright Copyright (c) 2024
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/inotify.h>
 
 #include "cache.h"
 #include "debug.h"
@@ -17,6 +19,7 @@
 static const size_t initial_capacity = 32768;
 
 typedef struct cache_s {
+    log_s *log;
     size_t capacity;
     size_t mask;
     size_t count;
@@ -24,6 +27,7 @@ typedef struct cache_s {
 } cache_s;
 
 static cache_s cache = {
+    .log = NULL,
     .capacity = initial_capacity,
     .mask = initial_capacity - 1,
     .count = 0,
@@ -80,13 +84,15 @@ void cache_free(void) {
     debug_return;
 }
 
-int cache_init(void) {
+int cache_init(log_s *log) {
     debug_enter();
+    cache.log = log;
     cache.capacity = initial_capacity;
     cache.mask = initial_capacity - 1;
     cache.count = 0;
     cache.data = calloc(cache.capacity, sizeof(cache_element_s));
     if (cache.data == NULL) {
+        log_error(log, "Error allocating %d bytes for cache data", cache.capacity * sizeof(cache_element_s));
         debug_return 1;
     }
     debug_return 0;
@@ -130,22 +136,29 @@ static inline int init_element(cache_element_s *e) {
     e->mime = NULL;
     FILE *f = fopen(e->path, "r");
     if (f == NULL) {
+        log_error(cache.log, "Error opening file %s: %s", e->path, strerror(errno));
         goto term;
     }
     if (fseek(f, 0, SEEK_END)) {
+        log_error(cache.log, "Error seeking file %s: %s", e->path, strerror(errno));
         goto term;
     }
     e->len = ftell(f);
     e->data = malloc(e->len);
     if (e->data == NULL) {
+        log_error(cache.log, "Error allocating %d bytes for cache data: %s", e->len, strerror(errno));
         goto term;
     }
     if (fseek(f, 0, SEEK_SET)) {
+        log_error(cache.log, "Error seeking file %s: %s", e->path, strerror(errno));
         goto term;
     }
     if (fread((char *)e->data, 1, e->len, f) != e->len) {
+        log_error(cache.log, "Error reading file %s: %s", e->path, strerror(errno));
         goto term;
     }
+    fclose(f);
+    f = NULL;
     e->mime = determine_mime(e);
     rc = 0;
 term:
@@ -203,6 +216,7 @@ static inline int resize(void) {
     new_cache.count = 0;
     new_cache.data = calloc(new_cache.capacity, sizeof(cache_element_s));
     if (new_cache.data == NULL) {
+        log_error(cache.log, "Unable to allocate %d bytes for cache data: %s", new_cache.capacity * sizeof(cache_element_s), strerror(errno));
         debug_return 1;
     }
     for (size_t i = 0; i < cache.capacity; i++) {
