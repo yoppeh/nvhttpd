@@ -9,36 +9,40 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "debug.h"
 #include "http.h"
-#include "logger.h"
+#include "log.h"
 #include "request.h"
 
 #define MAX_RECV_CHARACTERS 8192
 #define URL_VAR_NAME_MAX 128
 #define URL_VAR_VALUE_MAX 1024
-#define PATH_SIZE_MAX 1024
+#define URI_SIZE_MAX 1024
 #define BUFFER_SIZE 512
 
 static const int IO_OK = 0;
 static const int IO_EOF = -1;
 static const int IO_ERROR = -2;
+static const int http_version_major_default = 0;
+static const int http_version_minor_default = 9;
 
+static int add_header(request_s *request, char *var, char *val);
+static request_parse_error_e add_variable(request_s *request, char *var, char *val);
 static int io_next(request_s *request);
 static int io_peek(request_s *request);
-static int add_header(request_s *request, char *var, char *val);
-static int add_variable(request_s *request, char *var, char *val);
 static int get_headers(request_s *request);
-static int get_http_ver(request_s *request);
-static int get_method(request_s *request);
-static int get_path(request_s *request);
-static int get_variables(request_s *request);
+static request_parse_error_e get_http_ver(request_s *request);
+static request_parse_error_e get_method(request_s *request);
+static int get_query(request_s *request);
+static request_parse_error_e get_uri(request_s *request);
+static request_parse_error_e get_uri_fragment(request_s *request);
 static int parse_request(request_s *request);
-static char *parse_url_val(request_s *request);
-static char *parse_url_var(request_s *request, int separator);
+static request_parse_error_e parse_val(request_s *request, char **val);
+static request_parse_error_e parse_var(request_s *request, int separator, char **var);
 static int skip_ws(request_s *request);
 
 void request_free(request_s *request) {
@@ -49,11 +53,11 @@ void request_free(request_s *request) {
     if (request->buffer) {
         free(request->buffer);
     }
-    if (request->http_version) {
-        free(request->http_version);
+    if (request->uri) {
+        free(request->uri);
     }
-    if (request->path) {
-        free(request->path);
+    if (request->uri_fragment) {
+        free(request->uri_fragment);
     }
     if (request->url_variables) {
         http_variable_s *var = request->url_variables;
@@ -90,33 +94,180 @@ void request_free(request_s *request) {
 request_s *request_get(http_client_s *client) {
     debug_enter();
     http_server_s *server = client->server;
+    log_debug(server->log, "getting request");
     request_s *request = malloc(sizeof(request_s));
     if (request == NULL) {
-        logger_error(server->logger, "malloc failed: %s", strerror(errno));
+        log_error(server->log, "malloc failed: %s", strerror(errno));
         debug_return NULL;
     }
+    memset(request, 0, sizeof(request_s));
     request->buffer = malloc(BUFFER_SIZE);
     if (request->buffer == NULL) {
-        logger_error(server->logger, "malloc failed: %s", strerror(errno));
+        log_error(server->log, "malloc failed: %s", strerror(errno));
         free(request);
         debug_return NULL;
     }
     request->client = client;
     request->url_variables = NULL;
-    if (parse_request(request) != 0) {
-        free(request->buffer);
-        request->buffer = NULL;
-        free(request);
-        debug_return NULL;
-    }
+    log_debug(server->log, "request setup complete");
     debug_return request;
+}
+
+request_parse_error_e request_parse(request_s *request) {
+    debug_enter();
+    request_parse_error_e res;
+    log_s *log = request->client->server->log;
+    int ch;
+    log_debug(log, "parsing request");
+    res = get_method(request);
+    if (res != REQUEST_PARSE_OK) {
+        if (res == REQUEST_PARSE_BAD) {
+            debug_return REQUEST_PARSE_NOT_IMPLEMENTED;
+        }
+        debug_return res;
+    }
+    if (request->method != REQUEST_METHOD_GET && request->method != REQUEST_METHOD_HEAD) {
+        debug_return REQUEST_PARSE_NOT_IMPLEMENTED;
+    }
+    if ((ch = io_next(request)) < IO_OK) {
+        log_error(log, "I/O error");
+        debug_return REQUEST_PARSE_IO_ERROR;
+    }
+    if (!isspace(ch)) {
+        log_error(log, "invalid request: missing whitespace after method");
+        debug_return REQUEST_PARSE_BAD;
+    }
+    if ((ch = skip_ws(request)) < IO_OK) {
+        log_error(log, "I/O error");
+        debug_return REQUEST_PARSE_IO_ERROR;
+    }
+    if (ch == '\n') {
+        log_error(log, "invalid request: expected URI");
+        debug_return REQUEST_PARSE_BAD;
+    }
+    if ((ch = get_uri(request)) != REQUEST_PARSE_OK) {
+        debug_return ch;
+    }
+    if ((ch = io_peek(request)) < IO_OK) {
+        log_error(log, "I/O error");
+        debug_return REQUEST_PARSE_IO_ERROR;
+    }
+    if (ch == '?') {
+        if ((ch = get_query(request)) != REQUEST_PARSE_OK) {
+            log_error(log, "invalid request");
+            debug_return ch;
+        }
+        if ((ch = io_peek(request)) < IO_OK) {
+            log_error(log, "I/O error");
+            debug_return REQUEST_PARSE_IO_ERROR;
+        }
+    }
+    if (ch == '#') {
+        if ((ch = io_next(request)) < IO_OK) {
+            log_error(log, "I/O error");
+            debug_return REQUEST_PARSE_IO_ERROR;
+        }
+        if ((ch = get_uri_fragment(request)) != REQUEST_PARSE_OK) {
+            debug_return ch;
+        }
+    }
+    request->type = REQUEST_TYPE_FULL;
+    if (isspace(ch)) {
+        if ((ch = skip_ws(request)) < IO_OK) {
+            log_error(log, "I/O error");
+            debug_return REQUEST_PARSE_IO_ERROR;
+        }
+        if (ch == '\n') {
+            request->type = REQUEST_TYPE_SIMPLE;
+        }
+    }
+    log_debug(log, "got request type: %s", request->type == REQUEST_TYPE_SIMPLE ? "simple" : "full");
+    if (request->type == REQUEST_TYPE_SIMPLE) {
+        if (request->method != REQUEST_METHOD_GET) {
+            log_error(log, "invalid request, simple request must be GET");
+            debug_return REQUEST_PARSE_BAD;
+        }
+        request->http_version_major = http_version_major_default;
+        request->http_version_minor = http_version_minor_default;
+    } else {
+        if ((ch = get_http_ver(request)) != REQUEST_PARSE_OK) {
+            debug_return ch;
+        }
+    }
+    debug_return REQUEST_PARSE_OK;
+    if ((ch = io_next(request)) < IO_OK) {
+        log_error(log, "I/O error");
+        debug_return REQUEST_PARSE_IO_ERROR;
+    }
+    if (ch != '\r') {
+        log_error(log, "invalid request: expected \\r");
+        debug_return REQUEST_PARSE_BAD;
+    }
+    if ((ch = io_next(request)) < IO_OK) {
+        log_error(log, "I/O error");
+        debug_return REQUEST_PARSE_IO_ERROR;
+    }
+    if (ch != '\n') {
+        log_error(log, "invalid request: expected \\n");
+        debug_return REQUEST_PARSE_BAD;
+    }
+    if ((ch = get_headers(request)) != REQUEST_PARSE_OK) {
+        debug_return ch;
+    }
+    if ((ch = io_next(request)) < IO_OK) {
+        log_error(log, "I/O error");
+        debug_return REQUEST_PARSE_IO_ERROR;
+    }
+    if (ch != '\r') {
+        log_error(log, "invalid request: expected \\r");
+        debug_return REQUEST_PARSE_BAD;
+    }
+    if ((ch = io_next(request)) < IO_OK) {
+        log_error(log, "I/O error");
+        debug_return REQUEST_PARSE_IO_ERROR;
+    }
+    if (ch != '\n') {
+        log_error(log, "invalid request: expected \\n");
+        debug_return REQUEST_PARSE_BAD;
+    }
+    debug_return REQUEST_PARSE_OK;
+}
+
+static int add_header(request_s *request, char *var, char *val) {
+    debug_enter();
+    http_variable_s *variable = malloc(sizeof(http_variable_s));
+    if (variable == NULL) {
+        log_error(request->client->server->log, "malloc failed: %s", strerror(errno));
+        debug_return IO_ERROR;
+    }
+    variable->var = var;
+    variable->val = val;
+    variable->next = request->headers;
+    request->headers = variable;
+    debug("added header %s = %s\n", var, val);
+    debug_return IO_OK;
+}
+
+static request_parse_error_e add_variable(request_s *request, char *var, char *val) {
+    debug_enter();
+    http_variable_s *variable = malloc(sizeof(http_variable_s));
+    if (variable == NULL) {
+        log_error(request->client->server->log, "malloc failed: %s", strerror(errno));
+        debug_return REQUEST_PARSE_IO_ERROR;
+    }
+    variable->var = var;
+    variable->val = val;
+    variable->next = request->url_variables;
+    request->url_variables = variable;
+    debug("added query variable %s = %s\n", var, val);
+    debug_return REQUEST_PARSE_OK;
 }
 
 static int io_next(request_s *request) {
     if (request->buffer_index >= request->buffer_len) {
         request->buffer_len = recv(request->client->fd, request->buffer, BUFFER_SIZE, 0);
         if (request->buffer_len < 0) {
-            logger_error(request->client->server->logger, "recv failed: %s", strerror(errno));
+            log_error(request->client->server->log, "recv failed: %s", strerror(errno));
             return IO_ERROR;
         }
         if (request->buffer_len == 0) {
@@ -131,7 +282,7 @@ static int io_peek(request_s *request) {
     if (request->buffer_index >= request->buffer_len) {
         request->buffer_len = recv(request->client->fd, request->buffer, BUFFER_SIZE, 0);
         if (request->buffer_len < 0) {
-            logger_error(request->client->server->logger, "recv failed: %s", strerror(errno));
+            log_error(request->client->server->log, "recv failed: %s", strerror(errno));
             return IO_ERROR;
         }
         if (request->buffer_len == 0) {
@@ -142,231 +293,447 @@ static int io_peek(request_s *request) {
     return request->buffer[request->buffer_index];
 }
 
-static int add_header(request_s *request, char *var, char *val) {
-    debug_enter();
-    http_variable_s *variable = malloc(sizeof(http_variable_s));
-    if (variable == NULL) {
-        logger_error(request->client->server->logger, "malloc failed: %s", strerror(errno));
-        debug_return IO_ERROR;
-    }
-    variable->var = var;
-    variable->val = val;
-    variable->next = request->headers;
-    request->headers = variable;
-    debug("added header %s = %s\n", var, val);
-    debug_return IO_OK;
-}
-
-static int add_variable(request_s *request, char *var, char *val) {
-    debug_enter();
-    http_variable_s *variable = malloc(sizeof(http_variable_s));
-    if (variable == NULL) {
-        logger_error(request->client->server->logger, "malloc failed: %s", strerror(errno));
-        debug_return IO_ERROR;
-    }
-    variable->var = var;
-    variable->val = val;
-    variable->next = request->url_variables;
-    request->url_variables = variable;
-    debug("added url variable %s = %s\n", var, val);
-    debug_return IO_OK;
-}
-
 static int get_headers(request_s *request) {
     debug_enter();
+    log_s *log = request->client->server->log;
     int ch;
+    log_debug(log, "parsing headers");
     while (1) {
         if ((ch = io_peek(request)) < IO_OK) {
-            debug_return ch;
+            log_debug(log, "I/O error");
+            debug_return REQUEST_PARSE_IO_ERROR;
         }
         if (ch == '\r') {
             break;
         }
-        char *var = parse_url_var(request, ':');
-        if (var == NULL) {
-            return IO_ERROR;
+        char *var = NULL;
+        if ((ch = parse_var(request, ':', &var)) != REQUEST_PARSE_OK) {
+            return ch;
         }
-        if ((ch = io_peek(request)) != ':') {
-            debug_return IO_ERROR;
+        if (var == NULL) {
+            log_debug(log, "No var found");
+            return REQUEST_PARSE_BAD;
         }
         if ((ch = io_next(request)) < IO_OK) {
-            debug_return ch;
+            log_debug(log, "I/O error");
+            free(var);
+            debug_return REQUEST_PARSE_IO_ERROR;
         }
-        if ((ch = skip_ws(request)) < IO_OK) {
-            debug_return ch;
+        if (ch != ':') {
+            log_debug(log, "expected :, got %02xh", ch);
+            debug_return REQUEST_PARSE_BAD;
         }
-        char *val = parse_url_val(request);
+        if ((ch = io_next(request)) < IO_OK) {
+            log_debug(log, "I/O error");
+            debug_return REQUEST_PARSE_IO_ERROR;
+        }
+        if (ch != ' ') {
+            log_debug(log, "expected space, got %02xh", ch);
+            debug_return REQUEST_PARSE_BAD;
+        }
+        char *val = NULL;
+        if ((ch = parse_val(request, &val)) != REQUEST_PARSE_OK) {
+            free(var);
+            return ch;
+        }
         if (val == NULL) {
-            return IO_ERROR;
+            log_debug(log, "No val found");
+            free(var);
+            return REQUEST_PARSE_BAD;
         }
-        if (add_header(request, var, val) != IO_OK) {
+        if (add_header(request, var, val) != REQUEST_PARSE_OK) {
             free(var);
             free(val);
-            return IO_ERROR;
+            return REQUEST_PARSE_ERROR;
         }
-        if ((ch = io_peek(request)) == '\r') {
-            if ((ch = io_next(request)) < IO_OK) {
-                debug_return ch;
-            }
-            if ((ch = io_peek(request)) == '\n') {
-                if ((ch = io_next(request)) < IO_OK) {
-                    debug_return ch;
-                }
-            } else if (ch < IO_OK) {
-                debug_return ch;
-            }
-        } else if (ch < IO_OK) {
-            debug_return ch;
+        if ((ch = io_next(request)) < IO_OK) {
+            log_debug(log, "I/O error");
+            debug_return REQUEST_PARSE_IO_ERROR;
+        }
+        if (ch != '\r') {
+            log_debug(log, "expected \\r");
+            debug_return REQUEST_PARSE_BAD;
+        }
+        if ((ch = io_next(request)) < IO_OK) {
+            log_debug(log, "I/O error");
+            debug_return REQUEST_PARSE_IO_ERROR;
+        }
+        if (ch != '\n') {
+            log_debug(log, "expected \\n, got %02xh", ch);
+            debug_return REQUEST_PARSE_BAD;
         }
     }
-    debug_return IO_OK;
+    debug_return REQUEST_PARSE_OK;
 }
 
-static int get_http_ver(request_s *request) {
+static request_parse_error_e get_http_ver(request_s *request) {
     debug_enter();
+    log_s *log = request->client->server->log;
     int ch;
     int i;
-    char buffer[32];
-    for (i = 0; i < 32; i++) {
+    char buffer[16];
+    char *minor = NULL;
+    log_debug(log, "parsing http version");
+    if ((ch = io_next(request)) < IO_OK) {
+        log_error(log, "I/O error");
+        debug_return REQUEST_PARSE_IO_ERROR;
+    }
+    if (ch != 'H') {
+        log_error(log, "invalid http version");
+        debug_return REQUEST_PARSE_BAD;
+    }
+    if ((ch = io_next(request)) < IO_OK) {
+        log_error(log, "I/O error");
+        debug_return REQUEST_PARSE_IO_ERROR;
+    }
+    if (ch != 'T') {
+        log_error(log, "invalid http version");
+        debug_return REQUEST_PARSE_BAD;
+    }
+    if ((ch = io_next(request)) < IO_OK) {
+        log_error(log, "I/O error");
+        debug_return REQUEST_PARSE_IO_ERROR;
+    }
+    if (ch != 'T') {
+        log_error(log, "invalid http version");
+        debug_return REQUEST_PARSE_BAD;
+    }
+    if ((ch = io_next(request)) < IO_OK) {
+        log_error(log, "I/O error");
+        debug_return REQUEST_PARSE_IO_ERROR;
+    }
+    if (ch != 'P') {
+        log_error(log, "invalid http version");
+        debug_return REQUEST_PARSE_BAD;
+    }
+    if ((ch = io_next(request)) < IO_OK) {
+        log_error(log, "I/O error");
+        debug_return REQUEST_PARSE_IO_ERROR;
+    }
+    if (ch != '/') {
+        log_error(log, "invalid http version");
+        debug_return REQUEST_PARSE_BAD;
+    }
+    for (i = 0; i < sizeof(buffer) - 1; i++) {
         if ((ch = io_peek(request)) < IO_OK) {
-            debug_return IO_ERROR;
+            log_error(log, "I/O error");
+            debug_return REQUEST_PARSE_IO_ERROR;
         }
         if (isspace(ch)) {
             buffer[i] = 0;
             break;
+        } else if (!isdigit(ch) && ch != '.') {
+            log_error(log, "invalid http version");
+            debug_return REQUEST_PARSE_BAD;
+        } else if (ch == '.') {
+            if (minor != NULL) {
+                log_error(log, "invalid http version");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            ch = 0;
+            minor = &buffer[i + 1];
         }
-        ch = io_next(request);
-        if (ch < IO_OK) {
-            debug_return IO_ERROR;
+        if ((ch = io_next(request)) < IO_OK) {
+            log_error(log, "I/O error");
+            debug_return REQUEST_PARSE_IO_ERROR;
         }
-        buffer[i] = tolower(ch);
+        buffer[i] = ch;
     }
     buffer[i] = 0;
-    if (memcmp(buffer, "http/", 5) == 0) {
-        if ((request->http_version = strdup(buffer + 5)) == NULL) {
-            logger_error(request->client->server->logger, "strdup failed: %s", strerror(errno));
-            debug_return IO_ERROR;
-        }
-        debug("http version: %s\n", request->http_version);
-        debug_return IO_OK;
-    }
-    debug_return IO_ERROR;
+    request->http_version_major = strtol(buffer, NULL, 10);
+    request->http_version_minor = strtol(minor, NULL, 10);
+    debug("http version: %d\.%d\n", request->http_version_major, request->http_version_minor);
+    debug_return REQUEST_PARSE_OK;
 }
 
-static int get_method(request_s *request) {
+static request_parse_error_e get_method(request_s *request) {
     debug_enter();
     int ch;
-    char buffer[8];
-    for (int i = 0; i < 8; i++) {
-        if ((ch = io_peek(request)) < IO_OK) {
-            debug_return IO_ERROR;
-        }
-        if (isspace(ch)) {
-            buffer[i] = 0;
+    log_s *log = request->client->server->log;
+    log_debug(log, "parsing request method");
+    if ((ch = io_next(request)) < IO_OK) {
+        log_error(log, "I/O error");
+        debug_return REQUEST_PARSE_IO_ERROR;
+    }
+    switch (ch) {
+        case 'C':
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'O') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'N') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'N') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'E') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'C') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'T') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            request->method = REQUEST_METHOD_CONNECT;
             break;
-        }
-        ch = io_next(request);
-        if (ch < IO_OK) {
-            debug_return IO_ERROR;
-        }
-        buffer[i] = tolower(ch);
+        case 'D':
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'E') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'L') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'E') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'T') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'E') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            request->method = REQUEST_METHOD_DELETE;
+            break;
+        case 'G':
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'E') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'T') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            request->method = REQUEST_METHOD_GET;
+            break;
+        case 'H':
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'E') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'A') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'D') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            request->method = REQUEST_METHOD_HEAD;
+            break;
+        case 'O':
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'P') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'T') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'I') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'O') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'N') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'S') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            request->method = REQUEST_METHOD_OPTIONS;
+            break;
+        case 'P':
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch == 'O') {
+                if ((ch = io_next(request)) < IO_OK) {
+                    log_error(log, "I/O error");
+                    debug_return REQUEST_PARSE_IO_ERROR;
+                }
+                if (ch != 'S') {
+                log_error(log, "invalid method");
+                    debug_return REQUEST_PARSE_BAD;
+                }
+                if ((ch = io_next(request)) < IO_OK) {
+                    log_error(log, "I/O error");
+                    debug_return REQUEST_PARSE_IO_ERROR;
+                }
+                if (ch != 'T') {
+                log_error(log, "invalid method");
+                    debug_return REQUEST_PARSE_BAD;
+                }
+                request->method = REQUEST_METHOD_POST;
+            } else if (ch == 'U') {
+                if ((ch = io_next(request)) < IO_OK) {
+                    log_error(log, "I/O error");
+                    debug_return REQUEST_PARSE_IO_ERROR;
+                }
+                if (ch != 'T') {
+                log_error(log, "invalid method");
+                    debug_return REQUEST_PARSE_BAD;
+                }
+                request->method = REQUEST_METHOD_PUT;
+            }
+            debug_return REQUEST_PARSE_IO_ERROR;
+        case 'T':
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'R') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'A') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'C') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (ch != 'E') {
+                log_error(log, "invalid method");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            request->method = REQUEST_METHOD_TRACE;
+            break;
+        default:
+            log_error(log, "invalid method");
+            debug_return REQUEST_PARSE_BAD;
     }
-    ch = io_peek(request);
-    if (ch < IO_OK) {
-        debug_return IO_ERROR;
-    } else if (!isspace(ch)) {
-        debug_return IO_ERROR;
+    if ((ch = io_peek(request)) < IO_OK) {
+        log_error(log, "I/O error");
+        debug_return REQUEST_PARSE_IO_ERROR;
     }
-    if (memcmp(buffer, "connect", 7) == 0) {
-        request->method = HTTP_METHOD_CONNECT;
-        debug_return IO_OK;
-    } else if (memcmp(buffer, "delete", 6) == 0) {
-        request->method = HTTP_METHOD_DELETE;
-        debug_return IO_OK;
-    } else if (memcmp(buffer, "get", 3) == 0) {
-        request->method = HTTP_METHOD_GET;
-        debug_return IO_OK;
-    } else if (memcmp(buffer, "head", 4) == 0) {
-        request->method = HTTP_METHOD_HEAD;
-        debug_return IO_OK;
-    } else if (memcmp(buffer, "options", 7) == 0) {
-        request->method = HTTP_METHOD_OPTIONS;
-        debug_return IO_OK;
-    } else if (memcmp(buffer, "post", 4) == 0) {
-        request->method = HTTP_METHOD_POST;
-        debug_return IO_OK;
-    } else if (memcmp(buffer, "put", 3) == 0) {
-        request->method = HTTP_METHOD_PUT;
-        debug_return IO_OK;
-    } else if (memcmp(buffer, "trace", 5) == 0) {
-        request->method = HTTP_METHOD_TRACE;
-        debug_return IO_OK;
+    if (!isspace(ch)) {
+        log_error(log, "invalid method");
+        debug_return REQUEST_PARSE_BAD;
     }
-    debug_return IO_ERROR;
+    log_debug(log, "returning method %02x successfully", request->method);
+    debug_return REQUEST_PARSE_OK;
 }
 
-static int get_path(request_s *request) {
-    debug_enter();
-    static const char index_html_str[] = "index.html";
-    char *path = malloc(BUFFER_SIZE);
-    size_t path_size = BUFFER_SIZE;
-    size_t path_len = 0;
-    int ch;
-    while (1) {
-        ch = io_peek(request);
-        if (ch < IO_OK) {
-            free(path);
-            debug_return ch;
-        }
-        if (path_len >= path_size) {
-            if (path_size >= PATH_SIZE_MAX) {
-                logger_error(request->client->server->logger, "path too long > %d bytes", path_len);
-                free(path);
-                debug_return IO_ERROR;
-            }
-            path_size <<= 1;
-            char *new_path = realloc(path, path_size);
-            if (new_path == NULL) {
-                logger_error(request->client->server->logger, "realloc failed: %s", strerror(errno));
-                free(path);
-                debug_return IO_ERROR;
-            }
-            path = new_path;
-        }
-        if (isspace(ch) || ch == '?') {
-            break;
-        }
-        path[path_len++] = ch;
-        ch = io_next(request);
-        if (ch < IO_OK) {
-            free(path);
-            debug_return ch;
-        }
-    }
-    path[path_len] = 0;
-    if (path[path_len - 1] == '/') {
-        if (path_len + sizeof(index_html_str) > path_size) {
-            path_size = path_len + sizeof(index_html_str);
-            char *new_path = realloc(path, path_size);
-            if (new_path == NULL) {
-                logger_error(request->client->server->logger, "realloc failed: %s", strerror(errno));
-                free(path);
-                debug_return IO_ERROR;
-            }
-            path = new_path;
-        }
-        strcat(path, index_html_str);
-    }
-    if ((request->path = strdup(path)) == NULL) {
-        logger_error(request->client->server->logger, "strdup failed: %s", strerror(errno));
-        free(path);
-        debug_return IO_ERROR;
-    }
-    free(path);
-    debug_return IO_OK;
-}
-
-static int get_variables(request_s *request) {
+static int get_query(request_s *request) {
     debug_enter();
     int ch;
     if ((ch = io_next(request)) == IO_ERROR) {
@@ -377,212 +744,329 @@ static int get_variables(request_s *request) {
     }
     while (1) {
         if ((ch = io_peek(request)) < IO_OK) {
-            debug_return ch;
+            debug_return REQUEST_PARSE_IO_ERROR;
         }
-        if (isspace(ch)) {
-            debug_return IO_OK;
-        }
-        char *var = parse_url_var(request, '=');
-        if (var == NULL) {
-            return IO_ERROR;
-        }
-        if ((ch = io_peek(request)) != '=') {
-            debug_return IO_ERROR;
-        }
-        if ((ch = io_next(request)) < IO_OK) {
-            debug_return ch;
-        }
-        char *val = parse_url_val(request);
-        if (val == NULL) {
-            return IO_ERROR;
-        }
-        if (add_variable(request, var, val) != IO_OK) {
-            free(var);
-            free(val);
-            return IO_ERROR;
-        }
-        if ((ch = io_peek(request)) == '&') {
-            if ((ch = io_next(request)) < IO_OK) {
-                debug_return ch;
-            }
-        } else if (ch < IO_OK) {
-            debug_return ch;
-        }
-    }
-    debug_return IO_OK;
-}
-
-static int parse_request(request_s *request) {
-    debug_enter();
-    int ch;
-    if (skip_ws(request) != IO_OK) {
-        debug_return 1;
-    }
-    if (get_method(request) != IO_OK) {
-        debug_return 1;
-    }
-    if (skip_ws(request) != IO_OK) {
-        debug_return 1;
-    }
-    if (get_path(request) != IO_OK) {
-        debug_return 1;
-    }
-    if ((ch = io_peek(request)) < IO_OK) {
-        debug_return 1;
-    }
-    if (ch == '?') {
-        if (get_variables(request) != IO_OK) {
-            debug_return 1;
-        }
-    }
-    if (skip_ws(request) != IO_OK) {
-        debug_return 1;
-    }
-    if ((ch = io_peek(request)) < IO_OK) {
-        debug_return 1;
-    }
-    if (get_http_ver(request) != IO_OK) {
-        debug_return 1;
-    }
-    for (size_t i = MAX_RECV_CHARACTERS; i; i--) {
-        if ((ch = io_peek(request)) < IO_OK) {
-            debug_return 1;
-        }
-        if (ch == '\r') {
+        if (isspace(ch) || ch == '#') {
             break;
         }
-        if (!isspace(ch)) {
-            debug_return 1;
+        char *var = NULL;
+        if ((ch = parse_var(request, '=', &var)) != REQUEST_PARSE_OK) {
+            return ch;
         }
-        if (ch = io_next(request) < IO_OK) {
-            debug_return 1;
+        if (var == NULL) {
+            return REQUEST_PARSE_IO_ERROR;
+        }
+        if ((ch = io_next(request)) < IO_OK) {
+            free(var);
+            debug_return REQUEST_PARSE_IO_ERROR;
+        }
+        if (ch != '=') {
+            free(var);
+            debug_return REQUEST_PARSE_BAD;
+        }
+        char *val = NULL;
+        if ((ch = parse_val(request, &val)) != REQUEST_PARSE_OK) {
+            free(var);
+            return ch;
+        }
+        if (val == NULL) {
+            free(var);
+            return REQUEST_PARSE_IO_ERROR;
+        }
+        request_parse_error_e res = add_variable(request, var, val);
+        if (res != REQUEST_PARSE_OK) {
+            free(var);
+            free(val);
+            return res;
+        }
+        if ((ch = io_peek(request)) < IO_OK) {
+            debug_return REQUEST_PARSE_IO_ERROR;
+        }
+        if (ch == '&') {
+            if ((ch = io_next(request)) < IO_OK) {
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
         }
     }
-    if ((ch = io_next(request)) < IO_OK) {
-        debug_return 1;
-    }
-    if ((ch = io_next(request)) < IO_OK) {
-        debug_return 1;
-    }
-    if (ch == '\n') {
-        if (get_headers(request) != IO_OK) {
-            debug_return 1;
-        }
-    }
-    if ((ch = io_next(request)) < IO_OK) {
-        debug_return 1;
-    }
-    if (ch != '\r') {
-        debug_return 1;
-    }
-    if ((ch = io_next(request)) < IO_OK) {
-        debug_return 1;
-    }
-    if (ch != '\n') {
-        debug_return 1;
-    }
-    debug_return 0;
+    debug_return REQUEST_PARSE_OK;
 }
 
-static char *parse_url_val(request_s *request) {
+static request_parse_error_e get_uri(request_s *request) {
+    debug_enter();
+    static const char index_html_str[] = "index.html";
+    log_s *log = request->client->server->log;
+    char *uri = malloc(BUFFER_SIZE);
+    size_t uri_size = BUFFER_SIZE;
+    size_t uri_len = 0;
     int ch;
-    char *ret = NULL;
-    char *val = malloc(BUFFER_SIZE);
-    size_t val_size = BUFFER_SIZE;
-    size_t val_len = 0;
+    log_info(log, "parsing uri");
     while (1) {
         if ((ch = io_peek(request)) < IO_OK) {
-            free(val);
-            return NULL;
+            free(uri);
+            log_error(log, "I/O error");
+            debug_return REQUEST_PARSE_IO_ERROR;
         }
-        if (val_len >= val_size) {
-            if (val_size >= URL_VAR_VALUE_MAX) {
-                logger_error(request->client->server->logger, "url variable value too long > %d bytes", val_len);
-                free(val);
-                return NULL;
+        if (uri_len >= uri_size) {
+            if (uri_size >= URI_SIZE_MAX) {
+                free(uri);
+                log_error(log, "path too long > %d bytes", uri_len);
+                debug_return REQUEST_PARSE_ERROR;
             }
-            val_size <<= 1;
-            char *new_val = realloc(val, val_size);
-            if (new_val == NULL) {
-                logger_error(request->client->server->logger, "realloc failed: %s", strerror(errno));
-                free(val);
-                return NULL;
+            uri_size <<= 1;
+            char *new_uri = realloc(uri, uri_size);
+            if (new_uri == NULL) {
+                free(uri);
+                log_error(log, "realloc failed: %s", strerror(errno));
+                debug_return REQUEST_PARSE_ERROR;
             }
-            val = new_val;
+            uri = new_uri;
+        }
+        if (isspace(ch) || ch == '?' || ch == '#') {
+            break;
+        }
+        if (ch == '%') {
+            if ((ch = io_next(request)) < IO_OK) {
+                free(uri);
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                free(uri);
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (!isxdigit(ch)) {
+                free(uri);
+                log_error(log, "invalid hex digit");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            int digit = ch;
+            if ((ch = io_peek(request)) < IO_OK) {
+                free(uri);
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (!isxdigit(ch)) {
+                free(uri);
+                log_error(log, "invalid hex digit");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            ch += (digit << 4);
+        }
+        uri[uri_len++] = ch;
+        if ((ch = io_next(request)) < IO_OK) {
+            free(uri);
+            log_error(log, "I/O error");
+            debug_return REQUEST_PARSE_IO_ERROR;
+        }
+    }
+    uri[uri_len] = 0;
+    if (uri[uri_len - 1] == '/') {
+        if (uri_len + sizeof(index_html_str) > uri_size) {
+            uri_size = uri_len + sizeof(index_html_str);
+            char *new_uri = realloc(uri, uri_size);
+            if (new_uri == NULL) {
+                free(uri);
+                log_error(log, "realloc failed: %s", strerror(errno));
+                debug_return REQUEST_PARSE_ERROR;
+            }
+            uri = new_uri;
+        }
+        strcat(uri, index_html_str);
+    }
+    if ((request->uri = strdup(uri)) == NULL) {
+        free(uri);
+        log_error(log, "strdup failed: %s", strerror(errno));
+        debug_return REQUEST_PARSE_ERROR;
+    }
+    free(uri);
+    log_debug(log, "uri: %s", request->uri);
+    debug_return REQUEST_PARSE_OK;
+}
+
+static request_parse_error_e get_uri_fragment(request_s *request) {
+    debug_enter();
+    log_s *log = request->client->server->log;
+    char *fragment = malloc(BUFFER_SIZE);
+    size_t fragment_size = BUFFER_SIZE;
+    size_t fragment_len = 0;
+    int ch;
+    log_info(log, "parsing uri fragment");
+    while (1) {
+        if ((ch = io_peek(request)) < IO_OK) {
+            free(fragment);
+            log_error(log, "I/O error");
+            debug_return REQUEST_PARSE_IO_ERROR;
+        }
+        if (fragment_len >= fragment_size) {
+            if (fragment_size >= URI_SIZE_MAX) {
+                free(fragment);
+                log_error(log, "path too long > %d bytes", fragment_len);
+                debug_return REQUEST_PARSE_ERROR;
+            }
+            fragment_size <<= 1;
+            char *new_fragment = realloc(fragment, fragment_size);
+            if (new_fragment == NULL) {
+                free(fragment);
+                log_error(log, "realloc failed: %s", strerror(errno));
+                debug_return REQUEST_PARSE_ERROR;
+            }
+            fragment = new_fragment;
+        }
+        if (isspace(ch)) {
+            break;
+        }
+        if (ch == '%') {
+            if ((ch = io_next(request)) < IO_OK) {
+                free(fragment);
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if ((ch = io_next(request)) < IO_OK) {
+                free(fragment);
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (!isxdigit(ch)) {
+                free(fragment);
+                log_error(log, "invalid hex digit");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            int digit = ch;
+            if ((ch = io_peek(request)) < IO_OK) {
+                free(fragment);
+                log_error(log, "I/O error");
+                debug_return REQUEST_PARSE_IO_ERROR;
+            }
+            if (!isxdigit(ch)) {
+                free(fragment);
+                log_error(log, "invalid hex digit");
+                debug_return REQUEST_PARSE_BAD;
+            }
+            ch += (digit << 4);
+        }
+        fragment[fragment_len++] = ch;
+        if ((ch = io_next(request)) < IO_OK) {
+            free(fragment);
+            log_error(log, "I/O error");
+            debug_return REQUEST_PARSE_IO_ERROR;
+        }
+    }
+    fragment[fragment_len] = 0;
+    if ((request->uri_fragment = strdup(fragment)) == NULL) {
+        free(fragment);
+        log_error(log, "strdup failed: %s", strerror(errno));
+        debug_return REQUEST_PARSE_ERROR;
+    }
+    free(fragment);
+    log_debug(log, "uri fragment: %s", request->uri_fragment);
+    debug_return REQUEST_PARSE_OK;
+}
+
+static request_parse_error_e parse_val(request_s *request, char **val) {
+    int ch;
+    log_s *log = request->client->server->log;
+    char *ret = NULL;
+    char *res = malloc(BUFFER_SIZE);
+    size_t res_size = BUFFER_SIZE;
+    size_t res_len = 0;
+    while (1) {
+        if ((ch = io_peek(request)) < IO_OK) {
+            free(res);
+            return REQUEST_PARSE_IO_ERROR;
+        }
+        if (res_len >= res_size) {
+            if (res_size >= URL_VAR_VALUE_MAX) {
+                log_error(log, "url variable value too long > %d bytes", res_len);
+                free(res);
+                return REQUEST_PARSE_ERROR;
+            }
+            res_size <<= 1;
+            char *new_res = realloc(res, res_size);
+            if (new_res == NULL) {
+                log_error(log, "realloc failed: %s", strerror(errno));
+                free(res);
+                return REQUEST_PARSE_ERROR;
+            }
+            res = new_res;
         }
         if (ch == '&' || ch == '\r') {
             break;
         }
         if ((ch = io_next(request)) < IO_OK) {
-            free(val);
-            return NULL;
+            free(res);
+            return REQUEST_PARSE_IO_ERROR;
         }
-        val[val_len++] = ch;
+        res[res_len++] = ch;
     }
-    val[val_len] = 0;
-    if ((ret = strdup(val)) == NULL) {
-        logger_error(request->client->server->logger, "strdup failed: %s", strerror(errno));
-        free(val);
-        return NULL;
+    res[res_len] = 0;
+    if ((ret = strdup(res)) == NULL) {
+        log_error(log, "strdup failed: %s", strerror(errno));
+        free(res);
+        return REQUEST_PARSE_ERROR;
     }
-    free(val);
-    return ret;
+    free(res);
+    *val = ret;
+    return REQUEST_PARSE_OK;
 }
 
-static char *parse_url_var(request_s *request, int separator) {
+static request_parse_error_e parse_var(request_s *request, int separator, char **var) {
     int ch;
+    log_s *log = request->client->server->log;
     char *ret = NULL;
-    char *var = malloc(BUFFER_SIZE);
-    size_t var_size = BUFFER_SIZE;
-    size_t var_len = 0;
+    char *res = malloc(BUFFER_SIZE);
+    size_t res_size = BUFFER_SIZE;
+    size_t res_len = 0;
     while (1) {
-        if ((ch = io_peek(request)) < IO_OK || (isspace(ch) && separator != ':')) {
-            free(var);
-            return NULL;
+        if ((ch = io_peek(request)) < IO_OK) {
+            free(res);
+            return REQUEST_PARSE_IO_ERROR;
         }
-        if (var_len >= var_size) {
-            if (var_size >= URL_VAR_NAME_MAX) {
-                logger_error(request->client->server->logger, "url variable/header name too long > %d bytes", var_len);
-                free(var);
-                return NULL;
+        if (isspace(ch) && separator == '=') {
+            free(res);
+            return REQUEST_PARSE_BAD;
+        }
+        if (res_len >= res_size) {
+            if (res_size >= URL_VAR_NAME_MAX) {
+                log_error(log, "url variable/header name too long > %d bytes", res_len);
+                free(res);
+                return REQUEST_PARSE_ERROR;
             }
-            var_size <<= 1;
-            char *new_var = realloc(var, var_size);
-            if (new_var == NULL) {
-                logger_error(request->client->server->logger, "realloc failed: %s", strerror(errno));
-                free(var);
-                return NULL;
+            res_size <<= 1;
+            char *new_res = realloc(res, res_size);
+            if (new_res == NULL) {
+                log_error(log, "realloc failed: %s", strerror(errno));
+                free(res);
+                return REQUEST_PARSE_ERROR;
             }
-            var = new_var;
+            res = new_res;
         }
         if (ch == separator) {
             break;
         }
         if ((ch = io_next(request)) < IO_OK) {
-            free(var);
-            return NULL;
+            free(res);
+            return REQUEST_PARSE_IO_ERROR;
         }
-        var[var_len++] = ch;
+        res[res_len++] = ch;
     }
-    var[var_len] = 0;
-    if ((ret = strdup(var)) == NULL) {
-        logger_error(request->client->server->logger, "strdup failed: %s", strerror(errno));
-        free(var);
-        return NULL;
+    res[res_len] = 0;
+    if ((ret = strdup(res)) == NULL) {
+        log_error(log, "strdup failed: %s", strerror(errno));
+        free(res);
+        return REQUEST_PARSE_ERROR;
     }
-    free(var);
-    return ret;
+    free(res);
+    *var = ret;
+    return REQUEST_PARSE_OK;
 }
 
 static int skip_ws(request_s *request) {
     debug_enter();
     while (1) {
         int c = io_peek(request);
-        if (c < 0) {
+        if (c < 0 || !isspace(c) || c == '\n') {
             debug_return c;
-        }
-        if (!isspace(c)) {
-            debug_return IO_OK;
         }
         io_next(request);
     }

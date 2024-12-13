@@ -14,7 +14,7 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 
-#include "logger.h"
+#include "log.h"
 
 typedef struct http_variable_s {
     char *var;
@@ -23,7 +23,7 @@ typedef struct http_variable_s {
 } http_variable_s;
 
 typedef struct http_server_s {
-    logger_s *logger;
+    log_s *log;
     int fd;
     struct sockaddr_in addr;
 } http_server_s;
@@ -39,6 +39,6 @@ typedef struct http_client_s {
 extern http_client_s *http_accept(http_server_s *server);
 extern void http_client_close(http_client_s *client);
 extern void http_close(http_server_s *server);
-extern http_server_s *http_init(logger_s *logger, char *server_ip, int port);
+extern http_server_s *http_init(log_s *log, char *server_ip, int port);
 
 #endif // HTTP_H

@@ -19,13 +19,16 @@
 #include "config.h"
 #include "debug.h"
 #include "http.h"
-#include "logger.h"
+#include "log.h"
 #include "request.h"
 #include "response.h"
 
 #define log_file_def stdout
 
+static const char response_400_path[] = "/error/400.html";
 static const char response_404_path[] = "/error/404.html";
+static const char response_500_path[] = "/error/500.html";
+static const char response_501_path[] = "/error/501.html";
 
 static const char html_path_def[] = "html";
 static const char config_file_def[] = "nvhttpd.conf";
@@ -33,12 +36,12 @@ static const int server_port_def = 80;
 static const char server_ip_def[] = "any";
 static const char server_string_def[] = "nvhttpd";
 
-static logger_levels_e log_level = LOGGER_DEBUG;
+static log_levels_e log_level = LOG_DEBUG;
 static char *html_path = NULL;
 static char *config_file = NULL;
 static char *server_ip = NULL;
 static int server_port = server_port_def;
-static logger_s *logger = NULL;
+static log_s *log = NULL;
 static char *response_headers = NULL;
 static char **response_headers_array = NULL;
 static size_t response_headers_count = 0;
@@ -62,14 +65,14 @@ int main(int argc, char *argv[]) {
     if (configure(argc, argv) != 0) {
         goto shutdown;
     }
-    logger = logger_init(log_level, server_string, log_file);
-    if (logger == NULL) {
-        printf("logger initialization failed\n");
+    log = log_init(log_level, server_string, log_file);
+    if (log == NULL) {
+        printf("log initialization failed\n");
         goto shutdown;
     }
-    logger_info(logger, "starting up server");
+    log_info(log, "starting up server");
     if (cache_init() != 0) {
-        logger_error(logger, "cache initialization failed");
+        log_error(log, "cache initialization failed");
         goto shutdown;
     }
     struct sigaction sa;
@@ -77,19 +80,19 @@ int main(int argc, char *argv[]) {
     sa.sa_flags = 0;
     sigemptyset(&sa.sa_mask);
     if (sigaction(SIGINT, &sa, NULL) == -1) {
-        logger_error(logger, "signal initialization failed: %s", strerror(errno));
+        log_error(log, "signal initialization failed: %s", strerror(errno));
         goto shutdown;
     }
-    server = http_init(logger, server_ip, server_port);
-    logger_info(logger, "server listening on port %d", server_port);
+    server = http_init(log, server_ip, server_port);
+    log_info(log, "server listening on port %d", server_port);
     if (server == NULL) {
         goto shutdown;
     }
     rc = handle_connections(server);
 shutdown:
-    if (logger != NULL) {
-        logger_info(logger, "shutting down server");
-        logger_cleanup(logger);
+    if (log != NULL) {
+        log_info(log, "shutting down server");
+        log_cleanup(log);
     }
     cache_free();
     if (response_headers != NULL) {
@@ -123,53 +126,88 @@ shutdown:
 
 static void *handle_client_request(void *arg) {
     debug_enter();
-    char *path = NULL;
+    char *uri = NULL;
     if (arg == NULL) {
         debug_return NULL;
     }
     http_client_s *client = (http_client_s *)arg;
-    logger_info(logger, "handling new client connection from %s", client->ip);
+    cache_element_s cache_element;
+    cache_element_s *e;
+    const char const *path = NULL;
+    request_parse_error_e parse_error;
+    http_response_code_e code;
+    log_s *log = client->server->log;
+    log_info(log, "handling new client connection from %s", client->ip);
     request_s *request = request_get(client);
     http_variable_s *var = request->headers;
     if (request == NULL) {
-        goto terminate;
-    }
-    if (request->path == NULL) {
-        logger_error(client->server->logger, "no path in request");
-        goto terminate;
-    }
-    path = malloc(strlen(html_path) + strlen(request->path) + 1);
-    if (path == NULL) {
-        logger_error(client->server->logger, "malloc failed: %s", strerror(errno));
-        goto terminate;
-    }
-    memcpy(path, html_path, strlen(html_path));
-    memcpy(path + strlen(html_path), request->path, strlen(request->path) + 1);
-    logger_info(client->server->logger, "requesting path %s", path);
-    cache_element_s *e = cache_find(path);
-    if (e != NULL) {
-        logger_info(client->server->logger, "returning %s from cache", path);
-        size_t header_len = 0;
-        char *header = http_response_header(HTTP_RESPONSE_200, e->len, e->mime, response_headers, &header_len);
-        send(client->fd, header, header_len, 0);
-        send(client->fd, e->data, e->len, 0);
+        parse_error = REQUEST_PARSE_INTERNAL;
     } else {
-        logger_info(client->server->logger, "returning 404", path);
-        free(path);
-        path = malloc(strlen(html_path) + sizeof(response_404_path));
-        memcpy(path, html_path, strlen(html_path));
-        memcpy(path + strlen(html_path), response_404_path, sizeof(response_404_path));
-        e = cache_find(path);
-        if (e != NULL) {
-            size_t header_len = 0;
-            char * header = http_response_header(HTTP_RESPONSE_404, e->len, e->mime, response_headers, &header_len);
-            send(client->fd, header, header_len, 0);
-            send(client->fd, e->data, e->len, 0);
+        parse_error = request_parse(request);
+    }
+    if (parse_error == REQUEST_PARSE_OK) {
+        code = HTTP_RESPONSE_200;
+        path = request->uri;
+    } else {
+        switch (parse_error) {
+            case REQUEST_PARSE_BAD:
+                log_info(log, "returning 400");
+                code = HTTP_RESPONSE_400;
+                path = response_400_path;
+                break;
+            case REQUEST_PARSE_NOT_IMPLEMENTED:
+                log_info(log, "returning 501");
+                code = HTTP_RESPONSE_501;
+                path = response_501_path;
+                break;
+            default:
+                log_info(log, "returning 500");
+                code = HTTP_RESPONSE_500;
+                path = response_500_path;
+                break;
         }
     }
+    size_t path_len = strlen(path);
+    size_t html_len = strlen(html_path);
+    if ((uri = malloc(html_len + path_len + 1)) == NULL) {
+        log_error(log, "malloc failed: %s", strerror(errno));
+        goto terminate;
+    }
+    memcpy(uri, html_path, html_len);
+    memcpy(uri + html_len, path, path_len + 1);
+    if ((e = cache_find(uri)) == NULL) {
+        log_error(client->server->log, "cache find failed");
+        if (code == HTTP_RESPONSE_200) {
+            code = HTTP_RESPONSE_404;
+            free(uri);
+            path = response_404_path;
+            path_len = strlen(path);
+            if ((uri = malloc(html_len + path_len + 1)) == NULL) {
+                log_error(log, "malloc failed: %s", strerror(errno));
+                goto terminate;
+            }
+            memcpy(uri, html_path, html_len);
+            memcpy(uri + html_len, path, path_len + 1);
+            e = cache_find(uri);
+        }
+        if (e == NULL) {
+            e = &cache_element;
+            cache_element.data = response_code_str[code];
+            cache_element.hash = 0;
+            cache_element.len = strlen(cache_element.data);
+            cache_element.mime = "text/plain";
+        }
+    }
+    size_t header_len = 0;
+    size_t data_len = (request->method == REQUEST_METHOD_GET) ? e->len : 0;
+    char *header = http_response_header(code, data_len, e->mime, response_headers, &header_len);
+    send(client->fd, header, header_len, 0);
+    if (request->method == REQUEST_METHOD_GET) {
+        send(client->fd, e->data, e->len, 0);
+    }
 terminate:
-    if (path != NULL) {
-        free(path);
+    if (uri != NULL) {
+        free(uri);
     }
     request_free(request);
     http_client_close(client);
@@ -244,17 +282,17 @@ static config_error_t config_handler(char *section, char *key, char *value) {
     } else if (strcasecmp(section, "logging") == 0) {
         if (strcasecmp(key, "level") == 0) {
             if (strcasecmp(value, "error") == 0) {
-                log_level = LOGGER_ERROR;
+                log_level = LOG_ERROR;
             } else if (strcasecmp(value, "warn") == 0) {
-                log_level = LOGGER_WARN;
+                log_level = LOG_WARN;
             } else if (strcasecmp(value, "info") == 0) {
-                log_level = LOGGER_INFO;
+                log_level = LOG_INFO;
             } else if (strcasecmp(value, "debug") == 0) {
-                log_level = LOGGER_DEBUG;
+                log_level = LOG_DEBUG;
             } else if (strcasecmp(value, "trace") == 0) {
-                log_level = LOGGER_TRACE;
+                log_level = LOG_TRACE;
             } else if (strcasecmp(value, "all") == 0) {
-                log_level = LOGGER_ALL;
+                log_level = LOG_ALL;
             } else {
                 printf("unknown log level %s\n", value);
                 rc = CONFIG_ERROR_UNEXPECTED_VALUE;
@@ -360,11 +398,11 @@ static int handle_connections(http_server_s *server) {
         http_client_s *client = http_accept(server);
         pthread_attr_t attr;
         if (pthread_attr_init(&attr) != 0) {
-            logger_error(logger, "pthread_attr_init failed: %s", strerror(errno));
+            log_error(log, "pthread_attr_init failed: %s", strerror(errno));
             goto shutdown;
         }
         if (pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) != 0) {
-            logger_error(logger, "pthread_attr_setdetachstate failed: %s", strerror(errno));
+            log_error(log, "pthread_attr_setdetachstate failed: %s", strerror(errno));
             goto shutdown;
         }
         pthread_t thread_id;
