@@ -12,6 +12,10 @@
 
 #include "http.h"
 
+/**
+ * @brief HTTP request methods: CONNECT, DELETE, GET, HEAD, OPTIONS, POST,
+ * PUT, TRACE.
+ */
 typedef enum request_method_e {
     REQUEST_METHOD_CONNECT,
     REQUEST_METHOD_DELETE,
@@ -23,6 +27,9 @@ typedef enum request_method_e {
     REQUEST_METHOD_TRACE
 } request_method_e;
 
+/**
+ * @brief Error codes returned from the request module.
+ */
 typedef enum request_parse_error_e {
     REQUEST_PARSE_OK = 0,
     REQUEST_PARSE_IO_ERROR = 1,
@@ -32,13 +39,28 @@ typedef enum request_parse_error_e {
     REQUEST_PARSE_NOT_IMPLEMENTED = 501,
 } request_parse_error_e;
 
+/**
+ * @brief HTTP request types: SIMPLE and FULL, as specified in the HTTP RFC.
+ * The SIMPLE type refers to HTTP version 0.9 and FULL refers to version 1.0
+ * and later. The SIMPLE type must be GET only and doesn't have a version
+ * field.
+ */
 typedef enum request_type_e {
     REQUEST_TYPE_SIMPLE,
     REQUEST_TYPE_FULL
 } request_type_e;
 
+/**
+ * @brief Forward reference to http_request_s.
+ */
 typedef struct request_s http_request_s;
 
+/**
+ * @brief Represents an HTTP request. The client, request version,
+ * URI, URI fragment (the designator following a "#" in the URI),
+ * I/O buffer, URI query variable names and values, headers, 
+ * request method and type are tracked.
+ */
 typedef struct request_s {
     http_client_s *client;
     int http_version_major;
@@ -54,8 +76,28 @@ typedef struct request_s {
     request_type_e type;
 } request_s;
 
+/**
+ * @brief Free a request. This closes the connection and frees any memory
+ * allocated for the request.
+ * @param request Pointer to the request_s structure to free.
+ * @return nothing.
+ */
 extern void request_free(request_s *request);
+
+/** 
+ * @brief Establishes a request structure for the given client. The request
+ * must be free'd by request_free() when it is no longer needed.
+ * @param client The client to establish the request for.
+ * @return Returns a pointer to a new request_s structure or NULL on error.
+ */
 extern request_s *request_get(http_client_s *client);
+
+/**
+ * @brief Parses the incoming client request and fills in most of the fields
+ * of the given request_s structure.
+ * @param request The request structure to parse into.
+ * @return Returns a request_parse_error_e error code for the parse.
+ */
 extern request_parse_error_e request_parse(request_s *request);
 
 #endif // REQUEST_H
