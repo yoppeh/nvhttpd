@@ -23,7 +23,9 @@
 #      add -I/path/to/include to this variable. On Mac OS, for example, I use
 #      MacPorts, so I use make CFLAGS="-I/opt/local/include".
 #   debug=1
-#       Build with debug info
+#       Build with debug logging to stdout
+#	gdb=1
+#		Build with debugging symbols
 #   LDFLAGS
 #      Flags to pass to the linker. Defaults to -L/usr/lib. If libcurl or
 #      libjson-c are installed in a non-standard location, you may need to add
@@ -40,7 +42,10 @@ endif
 CFLAGS += -I/usr/include
 LDFLAGS += -L/usr/lib
 ifdef debug
-	CFLAGS += -g3 -D DEBUG
+	CFLAGS += -D DEBUG
+endif
+ifdef gdb
+	CFLAGS += -g3
 else
 	CFLAGS += -O3 -flto
 	LDFLAGS += -flto
@@ -52,7 +57,7 @@ endif
 EXES = nvhttpd
 OBJS = main.o cache.o config.o debug.o http.o log.o request.o response.o
 
-.PHONY: all bear clean install uninstall
+.PHONY: all bear clean help install uninstall
 
 all: $(EXES)
 
@@ -66,7 +71,7 @@ clean:
 
 nvhttpd: $(OBJS)
 	$(CC) $(LDFLAGS) $(LIBS) $^ -o $@
-ifndef debug
+ifndef gdb
 	strip $@
 endif
 
@@ -81,6 +86,41 @@ response.o: response.c debug.h http.h log.h request.h response.h
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+help:
+	@echo -e "Targets:"
+	@echo -e "\tall"
+	@echo -e "\t\tThe default target, if no target is specified. Compiles source files"
+	@echo -e "\t\tas necessary and links them into the final executable."
+	@echo -e "\tbear"
+	@echo -e "\t\tGenerates a compile_commands.json file for use with LSPs."
+	@echo -e "\tclean"
+	@echo -e "\t\tRemoves all object files and executables."
+	@echo -e "\tinstall"
+	@echo -e "\t\tInstalls executable and scripts into the directory specified by the prefix"
+	@echo -e "\t\tvariable. Defaults to /usr/local."
+	@echo -e "\tuninstall"
+	@echo -e "\t\tRemoves the executabl from bin, all the scripts from sbin"
+	@echo -e "Variables:"
+	@echo -e "\tCC"
+	@echo -e "\t\tThe C compiler to use. Defaults to gcc."
+	@echo -e "\tCFLAGS"
+	@echo -e "\t\tFlags to pass to the C compiler. Defaults to -I/usr/include. If libcurl"
+	@echo -e "\t\tor libjson-c are installed in a non-standard location, you may need to"
+	@echo -e "\t\tadd -I/path/to/include to this variable. On Mac OS, for example, I use"
+	@echo -e "\t\tMacPorts, so I use make CFLAGS=\"-I/opt/local/include\"."
+	@echo -e "\tdebug=1"
+	@echo -e "\t\tBuild with debug logging to stdout"
+	@echo -e "\tgdb=1"
+	@echo -e "\t\tBuild with debugging symbols"
+	@echo -e "\tLDFLAGS"
+	@echo -e "\t\tFlags to pass to the linker. Defaults to -L/usr/lib. If libcurl or"
+	@echo -e "\t\tlibjson-c are installed in a non-standard location, you may need to add"
+	@echo -e "\t\t-L/path/to/lib to this variable. On Mac OS, for example, I use MacPorts,"
+	@echo -e "\t\tso I use make LDFLAGS=\"-L/opt/local/lib\"."
+	@echo -e "\tprefix"
+	@echo -e "\t\tThe directory to install into. Defaults to /usr/local. Executables will be"
+	@echo -e "\t\tinstalled into $(prefix)/bin, scripts in $(prefix)/sbin"
 
 install: $(EXES)
 	install -d $(prefix)/bin
