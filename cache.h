@@ -23,7 +23,6 @@
  * responsibility of the user.
  */
 typedef struct cache_element_s {
-    int watch_descriptor;
     size_t hash;
     size_t len;
     const char *path;
