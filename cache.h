@@ -23,6 +23,7 @@
  * responsibility of the user.
  */
 typedef struct cache_element_s {
+    struct cache_element_s *next;
     size_t hash;
     size_t len;
     const char *path;
@@ -38,17 +39,13 @@ typedef struct cache_element_s {
  */
 extern cache_element_s *cache_find(const char *path);
 
-/**
- * @brief Frees the cache. 
- * @return void 
- */
-extern void cache_free(void);
+extern int cache_init(void);
 
 /**
- * @brief Initializes the cache.
+ * @brief Loads the cache from the given path.
+ * @param path The path to recursively load the cache from.
  * @param log Handle for logging.
  * @return 0 on success, 1 on no memory.
- */
-extern int cache_init(log_s *log);
+ */extern int cache_load(const char const *path, log_s *log);
 
 #endif // CACHE_H
