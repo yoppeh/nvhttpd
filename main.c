@@ -71,8 +71,12 @@ int main(int argc, char *argv[]) {
         goto shutdown;
     }
     log_info(log, "starting up server");
-    if (cache_init(log) != 0) {
+    if (cache_init() != 0) {
         log_error(log, "cache initialization failed");
+        goto shutdown;
+    }
+    if (cache_load(html_path, log) != 0) {
+        log_error(log, "cache load failed");
         goto shutdown;
     }
     struct sigaction sa;
@@ -94,7 +98,6 @@ shutdown:
         log_info(log, "shutting down server");
         log_cleanup(log);
     }
-    cache_free();
     if (response_headers != NULL) {
         free(response_headers);
     }
@@ -173,8 +176,7 @@ static void *handle_client_request(void *arg) {
         log_error(log, "malloc failed: %s", strerror(errno));
         goto terminate;
     }
-    memcpy(uri, html_path, html_len);
-    memcpy(uri + html_len, path, path_len + 1);
+    memcpy(uri, path, path_len + 1);
     if ((e = cache_find(uri)) == NULL) {
         log_error(client->server->log, "cache find failed");
         if (code == HTTP_RESPONSE_200) {
@@ -202,11 +204,33 @@ static void *handle_client_request(void *arg) {
     size_t data_len = (request->method == REQUEST_METHOD_GET) ? e->len : 0;
     char *header = http_response_header(code, data_len, e->mime, response_headers, &header_len);
     if (header != NULL) {
+        log_info(log, "sending response header to client %s", client->ip);
+        size_t offset = 0;
+        while (offset < header_len) {
+            size_t sent = send(client->fd, header + offset, header_len, 0);
+            if (sent == -1) {
+                log_error(log, "Error sending header to client %s: %s", client->ip, strerror(errno));
+                goto terminate;
+            }
+            header_len -= sent;
+            offset += sent;
+        }
         send(client->fd, header, header_len, 0);
         free(header);
     }
     if (request->method == REQUEST_METHOD_GET) {
-        send(client->fd, e->data, e->len, 0);
+        //log_info(log, "sending response data for file %s to client %s", e->path, client->ip);
+        size_t offset = 0;
+        size_t data_len = e->len;
+        while (offset < data_len) {
+            size_t sent = send(client->fd, e->data + offset, data_len, 0);
+            if (sent == -1) {
+                log_error(log, "Error sending data to client %s: %s", client->ip, strerror(errno));
+                goto terminate;
+            }
+            data_len -= sent;
+            offset += sent;
+        }
     }
 terminate:
     if (uri != NULL) {
@@ -237,9 +261,9 @@ static config_error_t config_handler(char *section, char *key, char *value) {
             }
             printf("server ip set to %s\n", server_ip);
         } else if (strcasecmp(key, "html_path") == 0) {
-            html_path = strdup(value);
+            html_path = strdup(html_path);
             if (html_path == NULL) {
-                printf("strdup failed: %s\n", strerror(errno));
+                printf("failed to allocate html path: %s\n", strerror(errno));
                 rc = CONFIG_ERROR_NO_MEMORY;
                 goto term;
             }
