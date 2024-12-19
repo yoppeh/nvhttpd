@@ -65,10 +65,11 @@ static volatile sig_atomic_t terminate = 0;
 
 static config_error_t config_handler(char *section, char *key, char *value);
 static int configure(int ac, char **av);
-static void int_handler(int sig);
+static void ctlc_handler(int sig);
 static int handle_connections(http_server_s *server);
 static void *handle_client_request(void *arg);
 static void generate_response(char *buffer, size_t *buffer_len, char *path, char *response, size_t response_len);
+static void reload_handler(int sig);
 
 int main(int argc, char *argv[]) {
     debug_enter();
@@ -148,22 +149,30 @@ int main(int argc, char *argv[]) {
         }
     }
     struct sigaction sa;
-    sa.sa_handler = int_handler;
+    sa.sa_handler = ctlc_handler;
     sa.sa_flags = 0;
     sigemptyset(&sa.sa_mask);
     if (sigaction(SIGINT, &sa, NULL) == -1) {
-        log_error(log, "signal initialization failed: %s", strerror(errno));
+        log_error(log, "ctl-c signal initialization failed: %s", strerror(errno));
         goto shutdown;
     }
-    server = http_init(log, ssl_ctx, server_ip, server_port);
+    sa.sa_handler = reload_handler;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGUSR1, &sa, NULL) == -1) {
+        log_error(log, "reload signal initialization failed: %s", strerror(errno));
+        goto shutdown;
+    }
+    server = http_init(log, ssl_ctx, html_path, server_ip, server_port);
     log_info(log, "server listening on port %d", server_port);
     if (server == NULL) {
         goto shutdown;
     }
     rc = handle_connections(server);
 shutdown:
+    debug("shutting down server with result code %d\n", rc);
     if (log != NULL) {
-        log_info(log, "shutting down server");
+        log_info(log, "shutting down server with result code %d", rc);
         log_cleanup(log);
     }
     if (response_headers != NULL) {
@@ -498,7 +507,7 @@ finish:
     debug_return rc;
 }
 
-static void int_handler(int sig) {
+static void ctlc_handler(int sig) {
     (void)sig;
     terminate = 1;
 }
@@ -524,4 +533,9 @@ static int handle_connections(http_server_s *server) {
     rc = 0;
 shutdown:
     debug_return rc;
+}
+
+static void reload_handler(int sig) {
+    (void)sig;
+    reload = 1;
 }

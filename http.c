@@ -18,14 +18,18 @@
 #include <errno.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#include "cache.h"
 #include "debug.h"
 #include "http.h"
 #include "log.h"
+
+volatile sig_atomic_t reload = 0;
 
 http_client_s *http_accept(http_server_s *server) {
     debug_enter();
@@ -36,6 +40,11 @@ http_client_s *http_accept(http_server_s *server) {
     }
     client->addr_len = sizeof(client->addr);
     client->fd = accept(server->fd, (struct sockaddr *)&client->addr, &client->addr_len);
+    if (reload == 1) {
+        if (cache_load(server->html_path, server->log) != 0) {
+            debug_return NULL;
+        }
+    }
     if (client->fd < 0) {
         log_error(server->log, "accept failed: %s", strerror(errno));
         free(client);
@@ -89,13 +98,14 @@ void http_close(http_server_s *server) {
     debug_return;
 }
 
-http_server_s *http_init(log_s *log, SSL_CTX *ssl_ctx, char *server_ip, int port) {
+http_server_s *http_init(log_s *log, SSL_CTX *ssl_ctx, const char const *html_path, char *server_ip, int port) {
     debug_enter();
     http_server_s *http = malloc(sizeof(http_server_s));
     if (http == NULL) {
         log_error(log, "malloc failed: %s", strerror(errno));
         debug_return NULL;
     }
+    http->html_path = html_path;
     http->ssl_ctx = ssl_ctx;
     http->fd = socket(AF_INET, SOCK_STREAM, 0);
     if (http->fd < 0) {
