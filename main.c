@@ -513,17 +513,19 @@ static int handle_connections(http_server_s *server) {
     while (!terminate) {
         http_client_s *client = http_accept(server);
         pthread_attr_t attr;
-        if (pthread_attr_init(&attr) != 0) {
-            log_error(log, "pthread_attr_init failed: %s", strerror(errno));
-            goto shutdown;
+        if (client != NULL) {
+            if (pthread_attr_init(&attr) != 0) {
+                log_error(log, "pthread_attr_init failed: %s", strerror(errno));
+                goto shutdown;
+            }
+            if (pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) != 0) {
+                log_error(log, "pthread_attr_setdetachstate failed: %s", strerror(errno));
+                goto shutdown;
+            }
+            pthread_t thread_id;
+            pthread_create(&thread_id, &attr, handle_client_request, (void *)client);
+            pthread_attr_destroy(&attr);
         }
-        if (pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) != 0) {
-            log_error(log, "pthread_attr_setdetachstate failed: %s", strerror(errno));
-            goto shutdown;
-        }
-        pthread_t thread_id;
-        pthread_create(&thread_id, &attr, handle_client_request, (void *)client);
-        pthread_attr_destroy(&attr);
     }
     rc = 0;
 shutdown:
