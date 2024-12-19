@@ -279,7 +279,7 @@ static request_parse_error_e add_variable(request_s *request, char *var, char *v
 
 static int io_next(request_s *request) {
     if (request->buffer_index >= request->buffer_len) {
-        request->buffer_len = recv(request->client->fd, request->buffer, BUFFER_SIZE, 0);
+        request->buffer_len = http_read(request->client, request->buffer, BUFFER_SIZE);
         if (request->buffer_len < 0) {
             log_error(request->client->server->log, "recv failed for client %s: %s", request->client->ip, strerror(errno));
             return IO_ERROR;
@@ -294,7 +294,7 @@ static int io_next(request_s *request) {
 
 static int io_peek(request_s *request) {
     if (request->buffer_index >= request->buffer_len) {
-        request->buffer_len = recv(request->client->fd, request->buffer, BUFFER_SIZE, 0);
+        request->buffer_len = http_read(request->client, request->buffer, BUFFER_SIZE);
         if (request->buffer_len < 0) {
             log_error(request->client->server->log, "recv failed for client %s: %s", request->client->ip, strerror(errno));
             return IO_ERROR;

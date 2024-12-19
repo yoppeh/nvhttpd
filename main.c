@@ -8,11 +8,16 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "cache.h"
@@ -30,9 +35,11 @@ static const char response_404_path[] = "/error/404.html";
 static const char response_500_path[] = "/error/500.html";
 static const char response_501_path[] = "/error/501.html";
 
+static const char pid_filename[] = "/var/run/nvhttpd.pid";
 static const char html_path_def[] = "html";
-static const char config_file_def[] = "nvhttpd.conf";
+static const char config_file_def[] = "/etc/nvhttpd/nvhttpd.conf";
 static const int server_port_def = 80;
+static const int server_ssl_port_def = 443;
 static const char server_ip_def[] = "any";
 static const char server_string_def[] = "nvhttpd";
 
@@ -40,7 +47,7 @@ static log_levels_e log_level = LOG_DEBUG;
 static char *html_path = NULL;
 static char *config_file = NULL;
 static char *server_ip = NULL;
-static int server_port = server_port_def;
+static int server_port = 0;
 static log_s *log = NULL;
 static char *response_headers = NULL;
 static char **response_headers_array = NULL;
@@ -49,6 +56,11 @@ static size_t response_headers_size = 0;
 static size_t response_headers_total = 0;
 static char *server_string = NULL;
 static FILE *log_file = NULL;
+static SSL_CTX *ssl_ctx = NULL;
+static char *ssl_cert_filename = NULL;
+static char *ssl_key_filename = NULL;
+static bool ssl_enabled = false;
+
 static volatile sig_atomic_t terminate = 0;
 
 static config_error_t config_handler(char *section, char *key, char *value);
@@ -60,14 +72,27 @@ static void generate_response(char *buffer, size_t *buffer_len, char *path, char
 
 int main(int argc, char *argv[]) {
     debug_enter();
+    int pid_file = -1;
     http_server_s *server = NULL;
     int rc = 1;
+    pid_file = open(pid_filename, (O_CREAT | O_WRONLY | O_TRUNC), S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    if (pid_file == -1) {
+        fprintf(stderr, "unable to open pid file %s: %s", pid_filename, strerror(errno));
+        goto shutdown;
+    }
+    char pid_str[32];
+    sprintf(pid_str, "%d", getpid());
+    if (write(pid_file, pid_str, strlen(pid_str)) != strlen(pid_str)) {
+        fprintf(stderr, "unable to write pid file %s: %s", pid_filename, strerror(errno));
+    }
+    close(pid_file);
+    pid_file = -1;
     if (configure(argc, argv) != 0) {
         goto shutdown;
     }
     log = log_init(log_level, server_string, log_file);
     if (log == NULL) {
-        printf("log initialization failed\n");
+        fprintf(stderr, "log initialization failed\n");
         goto shutdown;
     }
     log_info(log, "starting up server");
@@ -79,6 +104,49 @@ int main(int argc, char *argv[]) {
         log_error(log, "cache load failed");
         goto shutdown;
     }
+    if (ssl_enabled) {
+        debug("ssl enabled\n");
+        if (ssl_cert_filename == NULL) {
+            log_error(log, "ssl certificate filename not specified");
+            goto shutdown;
+        }
+        if (ssl_key_filename == NULL) {
+            log_error(log, "ssl key filename not specified");
+            goto shutdown;
+        }
+        SSL_library_init();
+        SSL_load_error_strings();
+        OpenSSL_add_all_algorithms();
+        ERR_clear_error();
+        if (!(ssl_ctx = SSL_CTX_new(TLS_server_method()))) {
+            log_error(log, "failed to initialize ssl context: %s", ERR_reason_error_string(ERR_get_error()));
+            goto shutdown;
+        }
+        ERR_clear_error();
+        if (SSL_CTX_use_certificate_file(ssl_ctx, ssl_cert_filename, SSL_FILETYPE_PEM) <= 0) {
+            log_error(log, "failed to load ssl cert %s: %s", ssl_cert_filename, ERR_reason_error_string(ERR_get_error()));
+            goto shutdown;
+        }
+        ERR_clear_error();
+        if (SSL_CTX_use_PrivateKey_file(ssl_ctx, ssl_key_filename, SSL_FILETYPE_PEM) <= 0) {
+            log_error(log, "failed to load ssl key %s: %s", ssl_key_filename, ERR_reason_error_string(ERR_get_error()));
+            goto shutdown;
+        }
+        ERR_clear_error();
+        if (!SSL_CTX_check_private_key(ssl_ctx)) {
+            log_error(log, "private key %s does not match the certificate %s", ssl_key_filename, ssl_cert_filename);
+            goto shutdown;
+        }
+    } else {
+        debug("ssl not enabled\n");
+    }
+    if (server_port == 0) {
+        if (ssl_ctx != NULL) {
+            server_port = server_ssl_port_def;
+        } else {
+            server_port = server_port_def;
+        }
+    }
     struct sigaction sa;
     sa.sa_handler = int_handler;
     sa.sa_flags = 0;
@@ -87,7 +155,7 @@ int main(int argc, char *argv[]) {
         log_error(log, "signal initialization failed: %s", strerror(errno));
         goto shutdown;
     }
-    server = http_init(log, server_ip, server_port);
+    server = http_init(log, ssl_ctx, server_ip, server_port);
     log_info(log, "server listening on port %d", server_port);
     if (server == NULL) {
         goto shutdown;
@@ -121,9 +189,13 @@ shutdown:
     if (config_file != NULL) {
         free(config_file);
     }
-    if (log_file != stderr && log_file != stdout) {
+    if (log_file != stderr && log_file != stdout && log_file > 0) {
         fclose(log_file);
     }
+    if (pid_file >= 0) {
+        close(pid_file);
+    }
+    unlink(pid_filename);
     debug_return rc;
 }
 
@@ -207,7 +279,7 @@ static void *handle_client_request(void *arg) {
         log_info(log, "sending response header to client %s", client->ip);
         size_t offset = 0;
         while (offset < header_len) {
-            size_t sent = send(client->fd, header + offset, header_len, 0);
+            size_t sent = http_write(client, header + offset, header_len);
             if (sent == -1) {
                 log_error(log, "Error sending header to client %s: %s", client->ip, strerror(errno));
                 goto terminate;
@@ -223,7 +295,7 @@ static void *handle_client_request(void *arg) {
         size_t offset = 0;
         size_t data_len = e->len;
         while (offset < data_len) {
-            size_t sent = send(client->fd, e->data + offset, data_len, 0);
+            size_t sent = http_write(client, e->data + offset, data_len);
             if (sent == -1) {
                 log_error(log, "Error sending data to client %s: %s", client->ip, strerror(errno));
                 goto terminate;
@@ -247,7 +319,6 @@ static config_error_t config_handler(char *section, char *key, char *value) {
     if (strcasecmp(section, "server") == 0) {
         if (strcasecmp(key, "port") == 0) {
             server_port = atoi(value);
-            printf("server port set to %d\n", server_port);
         } else if (strcasecmp(key, "ip") == 0) {
             if (strcasecmp(value, "any") == 0) {
                 server_ip = strdup(server_ip_def);
@@ -255,34 +326,31 @@ static config_error_t config_handler(char *section, char *key, char *value) {
                 server_ip = strdup(value);
             }
             if (server_ip == NULL) {
-                printf("strdup failed: %s\n", strerror(errno));
+                fprintf(stderr, "strdup failed: %s\n", strerror(errno));
                 rc = CONFIG_ERROR_NO_MEMORY;
                 goto term;
             }
-            printf("server ip set to %s\n", server_ip);
         } else if (strcasecmp(key, "html_path") == 0) {
             html_path = strdup(html_path);
             if (html_path == NULL) {
-                printf("failed to allocate html path: %s\n", strerror(errno));
+                fprintf(stderr, "failed to allocate html path: %s\n", strerror(errno));
                 rc = CONFIG_ERROR_NO_MEMORY;
                 goto term;
             }
-            printf("html path set to %s\n", html_path);
         } else if (strcasecmp(key, "name") == 0) {
             server_string = strdup(value);
             if (server_string == NULL) {
-                printf("strdup failed: %s\n", strerror(errno));
+                fprintf(stderr, "strdup failed: %s\n", strerror(errno));
                 rc = CONFIG_ERROR_NO_MEMORY;
                 goto term;
             }
-            printf("server name set to %s\n", server_string);
         }
     } else if (strcasecmp(section, "response-headers") == 0) {
         if (response_headers_array == NULL) {
             response_headers_size = 10;
             response_headers_array = malloc(response_headers_size * sizeof(char *));
             if (response_headers_array == NULL) {
-                printf("malloc failed: %s\n", strerror(errno));
+                fprintf(stderr, "malloc failed: %s\n", strerror(errno));
                 rc = CONFIG_ERROR_NO_MEMORY;
                 goto term;
             }
@@ -291,7 +359,7 @@ static config_error_t config_handler(char *section, char *key, char *value) {
             response_headers_size <<= 1;
             char **tmp = realloc(response_headers_array, response_headers_size * sizeof(char *));
             if (tmp == NULL) {
-                printf("realloc failed: %s\n", strerror(errno));
+                fprintf(stderr, "realloc failed: %s\n", strerror(errno));
                 rc = CONFIG_ERROR_NO_MEMORY;
                 goto term;
             }
@@ -300,7 +368,7 @@ static config_error_t config_handler(char *section, char *key, char *value) {
         size_t len = strlen(key) + strlen(value) + 5;
         char *s = malloc(len);
         if (s == NULL) {
-            printf("malloc failed: %s\n", strerror(errno));
+            fprintf(stderr, "malloc failed: %s\n", strerror(errno));
             rc = CONFIG_ERROR_NO_MEMORY;
             goto term;
         }
@@ -321,7 +389,7 @@ static config_error_t config_handler(char *section, char *key, char *value) {
             } else if (strcasecmp(value, "all") == 0) {
                 log_level = LOG_ALL;
             } else {
-                printf("unknown log level %s\n", value);
+                fprintf(stderr, "unknown log level %s\n", value);
                 rc = CONFIG_ERROR_UNEXPECTED_VALUE;
                 goto term;
             }
@@ -333,16 +401,33 @@ static config_error_t config_handler(char *section, char *key, char *value) {
             } else {
                 log_file = fopen(value, "a");
                 if (log_file == NULL) {
-                    printf("fopen failed: %s\n", strerror(errno));
+                    fprintf(stderr, "fopen failed: %s\n", strerror(errno));
                     rc = CONFIG_ERROR_UNEXPECTED_VALUE;
                     goto term;
-                } else {
-                    printf("logging to file %s\n", value);
                 }
             }
         }
+    } else if (strcasecmp(section, "ssl") == 0) {
+        if (strcasecmp(key, "certificate") == 0) {
+            ssl_cert_filename = strdup(value);
+        } else if (strcasecmp(key, "key") == 0) {
+            ssl_key_filename = strdup(value);
+        } else if (strcasecmp(key, "enabled") == 0) {
+            if (strcasecmp(value, "true") == 0 || strcasecmp(value, "1") == 0 || strcasecmp(value, "yes") == 0) {
+                ssl_enabled = true;
+            } else if (strcasecmp(value, "false") == 0 || strcasecmp(value, "0") == 0 || strcasecmp(value, "no") == 0) {
+                ssl_enabled = false;
+            } else {
+                fprintf(stderr, "invalid value for ssl.enabled: %s\n", value);
+                rc = CONFIG_ERROR_UNEXPECTED_VALUE;
+                goto term;
+            }
+        } else {
+            fprintf(stderr, "unrecognized ssl option: %s\n", key);
+            rc = CONFIG_ERROR_UNRECOGNIZED_SECTION;
+        }
     } else {
-        printf("unknown section: %s\n", section);
+        fprintf(stderr, "unknown section: %s\n", section);
         rc = CONFIG_ERROR_UNRECOGNIZED_SECTION;
     }
 term:
@@ -354,19 +439,19 @@ static int configure(int ac, char **av) {
     if (config_file == NULL) {
         config_file = strdup(config_file_def);
         if (config_file == NULL) {
-            printf("strdup failed: %s", strerror(errno));
+            fprintf(stderr, "strdup failed: %s", strerror(errno));
             goto finish;
         }
     }
     config_error_t config_rc = config_parse(config_file, config_handler);
     if (config_rc != CONFIG_ERROR_NONE) {
-        printf("config_parse failed: %s", config_get_error_string(config_rc));
+        fprintf(stderr, "config_parse failed: %s", config_get_error_string(config_rc));
         goto finish;
     }
     if (server_string == NULL) {
         server_string = strdup(server_string_def);
         if (server_string == NULL) {
-            printf("strdup failed: %s", strerror(errno));
+            fprintf(stderr, "strdup failed: %s", strerror(errno));
             goto finish;
         }
     }
@@ -376,21 +461,21 @@ static int configure(int ac, char **av) {
     if (html_path == NULL) {
         html_path = strdup(html_path_def);
         if (html_path == NULL) {
-            printf("strdup failed: %s", strerror(errno));
+            fprintf(stderr, "strdup failed: %s", strerror(errno));
             goto finish;
         }
     }
     if (server_ip == NULL) {
         server_ip = strdup(server_ip_def);
         if (server_ip == NULL) {
-            printf("strdup failed: %s", strerror(errno));
+            fprintf(stderr, "strdup failed: %s", strerror(errno));
             goto finish;
         }
     }
     if (response_headers_array != NULL && response_headers_count > 0) {
         response_headers = malloc(response_headers_total + 1);
         if (response_headers == NULL) {
-            printf("malloc failed: %s", strerror(errno));
+            fprintf(stderr, "malloc failed: %s", strerror(errno));
             goto finish;
         }
         size_t offset = 0;
