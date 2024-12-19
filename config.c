@@ -78,64 +78,59 @@ static config_error_t parse_section(void);
 static config_error_t read_file(void);
 
 static char io_next(void) {
-    debug_enter();
     char ch = io_peek();
     if (ch != IO_EOF) {
     	io_buffer_len--;
         io_buffer_ptr++;
     }
-	debug_return ch;
+	return ch;
 }
 
 static char io_peek(void) {
-    debug_enter();
 	if (file_handle == -1 || io_buffer == NULL || io_buffer_ptr == NULL) {
-		debug_return IO_EOF;
+		return IO_EOF;
 	}
 	if (io_buffer_len == 0) {
 		io_buffer_len = read(file_handle, io_buffer, BUFFER_SIZE);
 		if (io_buffer_len <= 0) {
-			debug_return IO_EOF;
+			return IO_EOF;
 		}
 		io_buffer_ptr = io_buffer;
 	}
-	debug_return *io_buffer_ptr;
+	return *io_buffer_ptr;
 }
 
 static int is_key_character(char ch) {
-    debug_enter();
     int i;
     /* alphabetic characters are always valid key characters */
     if (isalnum(ch)) {
-        debug_return 1;
+        return 1;
     }
     /* check for any other key characters */
     for (i = 0; i < sizeof(KEY_CHAR_ARRAY); i++) {
         if (KEY_CHAR_ARRAY[i] == ch) {
-            debug_return 1;
+            return 1;
         }
     }
-    debug_return 0;
+    return 0;
 }
 
 static int is_section_character(char ch) {
-    debug_enter();
     int i;
     /* alphabetic characters are always valid section characters */
     if (isalnum(ch)) {
-        debug_return 1;
+        return 1;
     }
     /* check for any other section characters */
     for (i = 0; i < sizeof(SECTION_CHAR_ARRAY); i++) {
         if (SECTION_CHAR_ARRAY[i] == ch) {
-            debug_return 1;
+            return 1;
         }
     }
-    debug_return 0;
+    return 0;
 }
 
 static config_error_t parse_key(char **key_ptr) {
-    debug_enter();
     char *temp_ptr;
     char *key = NULL;
     unsigned long int key_total = MEMORY_FRAGMENT_SIZE;
@@ -212,11 +207,10 @@ term:
         key = NULL;
     }
     *key_ptr = key;
-    debug_return rc;
+    return rc;
 }
 
 static config_error_t parse_assignment_operator(void) {
-    debug_enter();
     config_error_t rc = CONFIG_ERROR_NONE;
     char ch;
     /* Look for an assignment operator. The only other character allowed is 
@@ -244,11 +238,10 @@ static config_error_t parse_assignment_operator(void) {
             break;
         }
     }
-    debug_return rc;
+    return rc;
 }
 
 static config_error_t parse_delimited_value(char **value_ptr) {
-    debug_enter();
     char *temp_ptr;
     char *value = NULL;
     unsigned long int value_total = MEMORY_FRAGMENT_SIZE;
@@ -340,11 +333,10 @@ term:
         value = NULL;
     }
     *value_ptr = value;
-    debug_return rc;
+    return rc;
 }
 
 static config_error_t parse_raw_value(char **value_ptr) {
-    debug_enter();
     char *temp_ptr;
     char *value = NULL;
     unsigned long int value_total = MEMORY_FRAGMENT_SIZE;
@@ -409,11 +401,10 @@ term:
         value = NULL;
     }
     *value_ptr = value;
-    debug_return rc;
+    return rc;
 }
 
 static config_error_t parse_value(char **value_ptr) {
-    debug_enter();
     char ch;
     /* Skip leading whitespace */
     while (1) {
@@ -433,14 +424,13 @@ static config_error_t parse_value(char **value_ptr) {
     }
     /* Call appropriate parser, based on if a delimiter was encountered. */
     if (ch == CONFIG_CHAR_VALUE_DELIMITER) {
-        debug_return parse_delimited_value(value_ptr);
+        return parse_delimited_value(value_ptr);
     } else {
-        debug_return parse_raw_value(value_ptr);
+        return parse_raw_value(value_ptr);
     }
 }
 
 static config_error_t parse_assignment(void) {
-    debug_enter();
     config_error_t rc;
     char *key = NULL;
     char *value = NULL;
@@ -468,11 +458,10 @@ term:
     if (value != NULL) {
         free(value);
     }
-    debug_return rc;
+    return rc;
 }
 
 static config_error_t parse_comment(void) {
-    debug_enter();
     config_error_t rc = CONFIG_ERROR_NONE;
     char ch;
     while (1) {
@@ -488,11 +477,10 @@ static config_error_t parse_comment(void) {
         }
         io_next();
     }
-    debug_return rc;
+    return rc;
 }
 
 static config_error_t parse_section(void) {
-    debug_enter();
     char *temp_ptr;
     char *section = NULL;
     unsigned long int section_total = 0;
@@ -570,11 +558,10 @@ term:
             current_section = section;
         }
     }
-    debug_return rc;
+    return rc;
 }
 
 static config_error_t read_file(void) {
-    debug_enter();
     config_error_t rc = CONFIG_ERROR_NONE;
     char ch;
     while (1) {
@@ -616,25 +603,22 @@ static config_error_t read_file(void) {
             break;
         }
     }
-    debug_return rc;
+    return rc;
 }
 
 unsigned long int config_get_line_number(void) {
-    debug_enter();
-    debug_return line;
+    return line;
 }
 
 const char *config_get_error_string(config_error_t error) {
-    debug_enter();
     if (error < CONFIG_ERROR_COUNT) {
-        debug_return error_string[error];
+        return error_string[error];
     } else {
-        debug_return error_string[CONFIG_ERROR_COUNT];
+        return error_string[CONFIG_ERROR_COUNT];
     }
 }
 
 config_error_t config_parse(char *file_name, config_handler_func_t *handler) {
-    debug_enter();
 	config_error_t rc = CONFIG_ERROR_NONE;
     /* open the input config file */
 	if (file_name == NULL || strlen(file_name) == 0) {
@@ -672,5 +656,5 @@ cleanup:
         current_section = NULL;
     }
     assignment_handler = NULL;
-	debug_return rc;
+	return rc;
 }

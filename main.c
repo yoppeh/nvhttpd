@@ -35,13 +35,22 @@ static const char response_404_path[] = "/error/404.html";
 static const char response_500_path[] = "/error/500.html";
 static const char response_501_path[] = "/error/501.html";
 
+static const char cfg_filename[] = "nvhttpd.conf";
+static const char cfg_filename_primary[] = "/etc/nvhttpd/nvhttpd.conf";
 static const char pid_filename[] = "/var/run/nvhttpd.pid";
 static const char html_path_def[] = "html";
-static const char config_file_def[] = "/etc/nvhttpd/nvhttpd.conf";
 static const int server_port_def = 80;
 static const int server_ssl_port_def = 443;
 static const char server_ip_def[] = "any";
 static const char server_string_def[] = "nvhttpd";
+
+static const char const *strong_ciphers = 
+    "ECDHE-ECDSA-AES256-GCM-SHA384:"
+    "ECDHE-RSA-AES256-GCM-SHA384:"
+    "ECDHE-ECDSA-CHACHA20-POLY1305:"
+    "ECDHE-RSA-CHACHA20-POLY1305:"
+    "ECDHE-ECDSA-AES128-GCM-SHA256:"
+    "ECDHE-RSA-AES128-GCM-SHA256";
 
 static log_levels_e log_level = LOG_DEBUG;
 static char *html_path = NULL;
@@ -65,11 +74,12 @@ static volatile sig_atomic_t terminate = 0;
 
 static config_error_t config_handler(char *section, char *key, char *value);
 static int configure(int ac, char **av);
-static void ctlc_handler(int sig);
-static int handle_connections(http_server_s *server);
 static void *handle_client_request(void *arg);
-static void generate_response(char *buffer, size_t *buffer_len, char *path, char *response, size_t response_len);
-static void reload_handler(int sig);
+static int handle_connections(http_server_s *server);
+static int init_signal_handlers(void);
+static int init_ssl(void);
+static void sig_handler_ctlc(int sig);
+static void sig_handler_reload(int sig);
 
 int main(int argc, char *argv[]) {
     debug_enter();
@@ -106,61 +116,14 @@ int main(int argc, char *argv[]) {
         goto shutdown;
     }
     if (ssl_enabled) {
-        debug("ssl enabled\n");
-        if (ssl_cert_filename == NULL) {
-            log_error(log, "ssl certificate filename not specified");
-            goto shutdown;
-        }
-        if (ssl_key_filename == NULL) {
-            log_error(log, "ssl key filename not specified");
-            goto shutdown;
-        }
-        SSL_library_init();
-        SSL_load_error_strings();
-        OpenSSL_add_all_algorithms();
-        ERR_clear_error();
-        if (!(ssl_ctx = SSL_CTX_new(TLS_server_method()))) {
-            log_error(log, "failed to initialize ssl context: %s", ERR_reason_error_string(ERR_get_error()));
-            goto shutdown;
-        }
-        ERR_clear_error();
-        if (SSL_CTX_use_certificate_file(ssl_ctx, ssl_cert_filename, SSL_FILETYPE_PEM) <= 0) {
-            log_error(log, "failed to load ssl cert %s: %s", ssl_cert_filename, ERR_reason_error_string(ERR_get_error()));
-            goto shutdown;
-        }
-        ERR_clear_error();
-        if (SSL_CTX_use_PrivateKey_file(ssl_ctx, ssl_key_filename, SSL_FILETYPE_PEM) <= 0) {
-            log_error(log, "failed to load ssl key %s: %s", ssl_key_filename, ERR_reason_error_string(ERR_get_error()));
-            goto shutdown;
-        }
-        ERR_clear_error();
-        if (!SSL_CTX_check_private_key(ssl_ctx)) {
-            log_error(log, "private key %s does not match the certificate %s", ssl_key_filename, ssl_cert_filename);
+        if (init_ssl() != 0) {
             goto shutdown;
         }
     } else {
         debug("ssl not enabled\n");
+        log_info(log, "ssl disabled");
     }
-    if (server_port == 0) {
-        if (ssl_ctx != NULL) {
-            server_port = server_ssl_port_def;
-        } else {
-            server_port = server_port_def;
-        }
-    }
-    struct sigaction sa;
-    sa.sa_handler = ctlc_handler;
-    sa.sa_flags = 0;
-    sigemptyset(&sa.sa_mask);
-    if (sigaction(SIGINT, &sa, NULL) == -1) {
-        log_error(log, "ctl-c signal initialization failed: %s", strerror(errno));
-        goto shutdown;
-    }
-    sa.sa_handler = reload_handler;
-    sa.sa_flags = 0;
-    sigemptyset(&sa.sa_mask);
-    if (sigaction(SIGUSR1, &sa, NULL) == -1) {
-        log_error(log, "reload signal initialization failed: %s", strerror(errno));
+    if (init_signal_handlers() != 0) {
         goto shutdown;
     }
     server = http_init(log, ssl_ctx, html_path, server_ip, server_port);
@@ -208,122 +171,7 @@ shutdown:
     debug_return rc;
 }
 
-static void *handle_client_request(void *arg) {
-    debug_enter();
-    char *uri = NULL;
-    if (arg == NULL) {
-        debug_return NULL;
-    }
-    http_client_s *client = (http_client_s *)arg;
-    cache_element_s cache_element;
-    cache_element_s *e;
-    const char const *path = NULL;
-    request_parse_error_e parse_error;
-    http_response_code_e code;
-    log_s *log = client->server->log;
-    log_info(log, "handling new client connection from %s", client->ip);
-    request_s *request = request_get(client);
-    http_variable_s *var = request->headers;
-    if (request == NULL) {
-        parse_error = REQUEST_PARSE_INTERNAL;
-    } else {
-        parse_error = request_parse(request);
-    }
-    if (parse_error == REQUEST_PARSE_OK) {
-        code = HTTP_RESPONSE_200;
-        path = request->uri;
-    } else {
-        switch (parse_error) {
-            case REQUEST_PARSE_BAD:
-                log_info(log, "returning 400");
-                code = HTTP_RESPONSE_400;
-                path = response_400_path;
-                break;
-            case REQUEST_PARSE_NOT_IMPLEMENTED:
-                log_info(log, "returning 501");
-                code = HTTP_RESPONSE_501;
-                path = response_501_path;
-                break;
-            default:
-                log_info(log, "returning 500");
-                code = HTTP_RESPONSE_500;
-                path = response_500_path;
-                break;
-        }
-    }
-    size_t path_len = strlen(path);
-    size_t html_len = strlen(html_path);
-    if ((uri = malloc(html_len + path_len + 1)) == NULL) {
-        log_error(log, "malloc failed: %s", strerror(errno));
-        goto terminate;
-    }
-    memcpy(uri, path, path_len + 1);
-    if ((e = cache_find(uri)) == NULL) {
-        log_error(client->server->log, "cache find failed");
-        if (code == HTTP_RESPONSE_200) {
-            code = HTTP_RESPONSE_404;
-            free(uri);
-            path = response_404_path;
-            path_len = strlen(path);
-            if ((uri = malloc(html_len + path_len + 1)) == NULL) {
-                log_error(log, "malloc failed: %s", strerror(errno));
-                goto terminate;
-            }
-            memcpy(uri, html_path, html_len);
-            memcpy(uri + html_len, path, path_len + 1);
-            e = cache_find(uri);
-        }
-        if (e == NULL) {
-            e = &cache_element;
-            cache_element.data = response_code_str[code];
-            cache_element.hash = 0;
-            cache_element.len = strlen(cache_element.data);
-            cache_element.mime = "text/plain";
-        }
-    }
-    size_t header_len = 0;
-    size_t data_len = (request->method == REQUEST_METHOD_GET) ? e->len : 0;
-    char *header = http_response_header(code, data_len, e->mime, response_headers, &header_len);
-    if (header != NULL) {
-        log_info(log, "sending response header to client %s", client->ip);
-        size_t offset = 0;
-        while (offset < header_len) {
-            size_t sent = http_write(client, header + offset, header_len);
-            if (sent == -1) {
-                log_error(log, "Error sending header to client %s: %s", client->ip, strerror(errno));
-                goto terminate;
-            }
-            header_len -= sent;
-            offset += sent;
-        }
-        send(client->fd, header, header_len, 0);
-        free(header);
-    }
-    if (request->method == REQUEST_METHOD_GET) {
-        //log_info(log, "sending response data for file %s to client %s", e->path, client->ip);
-        size_t offset = 0;
-        size_t data_len = e->len;
-        while (offset < data_len) {
-            size_t sent = http_write(client, e->data + offset, data_len);
-            if (sent == -1) {
-                log_error(log, "Error sending data to client %s: %s", client->ip, strerror(errno));
-                goto terminate;
-            }
-            data_len -= sent;
-            offset += sent;
-        }
-    }
-terminate:
-    if (uri != NULL) {
-        free(uri);
-    }
-    request_free(request);
-    http_client_close(client);
-    debug_return NULL;
-}
-
 static config_error_t config_handler(char *section, char *key, char *value) {
-    debug_enter();
     config_error_t rc = CONFIG_ERROR_NONE;
     if (strcasecmp(section, "server") == 0) {
         if (strcasecmp(key, "port") == 0) {
@@ -440,18 +288,47 @@ static config_error_t config_handler(char *section, char *key, char *value) {
         rc = CONFIG_ERROR_UNRECOGNIZED_SECTION;
     }
 term:
-    debug_return rc;
+    return rc;
 }
 
 static int configure(int ac, char **av) {
+    debug_enter();
+    struct stat buffer;
     int rc = 1;
-    if (config_file == NULL) {
-        config_file = strdup(config_file_def);
+    if (stat(cfg_filename_primary, &buffer) == 0) {
+        config_file = strdup(cfg_filename_primary);
         if (config_file == NULL) {
             fprintf(stderr, "strdup failed: %s", strerror(errno));
             goto finish;
         }
+    } else {
+        char *run_path = malloc(strlen(av[0]) + strlen(cfg_filename) + 1);
+        if (run_path == NULL) {
+            fprintf(stderr, "malloc failed: %s", strerror(errno));
+            goto finish;
+        }
+        strcpy(run_path, av[0]);
+        char *last_slash = strrchr(run_path, '/');
+        if (last_slash != NULL) {
+            *last_slash = '\0';
+        }
+        strcat(run_path, cfg_filename);
+        if (stat(run_path, &buffer) == 0) {
+            config_file = strdup(run_path);
+            if (config_file == NULL) {
+                fprintf(stderr, "strdup failed: %s", strerror(errno));
+                free(run_path);
+                goto finish;
+            }
+        }
+        free(run_path);
     }
+    if (config_file == NULL) {
+        fprintf(stderr, "no config file specified and none found, using defaults\n");
+        rc = 0;
+        goto finish;
+    }
+    debug("using config file found at %s\n", config_file);
     config_error_t config_rc = config_parse(config_file, config_handler);
     if (config_rc != CONFIG_ERROR_NONE) {
         fprintf(stderr, "config_parse failed: %s", config_get_error_string(config_rc));
@@ -481,6 +358,13 @@ static int configure(int ac, char **av) {
             goto finish;
         }
     }
+    if (server_port == 0) {
+        if (ssl_ctx != NULL) {
+            server_port = server_ssl_port_def;
+        } else {
+            server_port = server_port_def;
+        }
+    }
     if (response_headers_array != NULL && response_headers_count > 0) {
         response_headers = malloc(response_headers_total + 1);
         if (response_headers == NULL) {
@@ -507,9 +391,120 @@ finish:
     debug_return rc;
 }
 
-static void ctlc_handler(int sig) {
-    (void)sig;
-    terminate = 1;
+static void *handle_client_request(void *arg) {
+    debug_enter();
+    char *uri = NULL;
+    if (arg == NULL) {
+        debug_return NULL;
+    }
+    http_client_s *client = (http_client_s *)arg;
+    cache_element_s cache_element;
+    cache_element_s *e;
+    const char const *path = NULL;
+    request_parse_error_e parse_error;
+    http_response_code_e code;
+    log_s *log = client->server->log;
+    log_info(log, "handling new client connection from %s", client->ip);
+    request_s *request = request_get(client);
+    http_variable_s *var = request->headers;
+    if (request == NULL) {
+        parse_error = REQUEST_PARSE_INTERNAL;
+    } else {
+        parse_error = request_parse(request);
+    }
+    if (parse_error == REQUEST_PARSE_OK) {
+        code = HTTP_RESPONSE_200;
+        path = request->uri;
+    } else {
+        switch (parse_error) {
+            case REQUEST_PARSE_BAD:
+                log_info(log, "returning 400");
+                code = HTTP_RESPONSE_400;
+                path = response_400_path;
+                break;
+            case REQUEST_PARSE_NOT_IMPLEMENTED:
+                log_info(log, "returning 501");
+                code = HTTP_RESPONSE_501;
+                path = response_501_path;
+                break;
+            case REQUEST_PARSE_IO_ERROR:
+                goto terminate;
+            default:
+                log_info(log, "returning 500");
+                code = HTTP_RESPONSE_500;
+                path = response_500_path;
+                break;
+        }
+    }
+    size_t path_len = strlen(path);
+    size_t html_len = strlen(html_path);
+    if ((uri = malloc(html_len + path_len + 1)) == NULL) {
+        log_error(log, "malloc failed: %s", strerror(errno));
+        goto terminate;
+    }
+    memcpy(uri, path, path_len + 1);
+    if ((e = cache_find(uri)) == NULL) {
+        log_error(client->server->log, "cache find failed");
+        if (code == HTTP_RESPONSE_200) {
+            code = HTTP_RESPONSE_404;
+            free(uri);
+            path = response_404_path;
+            path_len = strlen(path);
+            if ((uri = malloc(html_len + path_len + 1)) == NULL) {
+                log_error(log, "malloc failed: %s", strerror(errno));
+                goto terminate;
+            }
+            memcpy(uri, html_path, html_len);
+            memcpy(uri + html_len, path, path_len + 1);
+            e = cache_find(uri);
+        }
+        if (e == NULL) {
+            e = &cache_element;
+            cache_element.data = response_code_str[code];
+            cache_element.hash = 0;
+            cache_element.len = strlen(cache_element.data);
+            cache_element.mime = "text/plain";
+        }
+    }
+    size_t header_len = 0;
+    size_t data_len = (request->method == REQUEST_METHOD_GET) ? e->len : 0;
+    char *header = http_response_header(code, data_len, e->mime, response_headers, &header_len);
+    if (header != NULL) {
+        log_info(log, "sending response header to client %s", client->ip);
+        size_t offset = 0;
+        while (offset < header_len) {
+            size_t sent = http_write(client, header + offset, header_len);
+            if (sent == -1) {
+                log_error(log, "Error sending header to client %s: %s", client->ip, strerror(errno));
+                goto terminate;
+            }
+            header_len -= sent;
+            offset += sent;
+        }
+        send(client->fd, header, header_len, 0);
+        free(header);
+    }
+    if (request->method == REQUEST_METHOD_GET) {
+        //log_info(log, "sending response data for file %s to client %s", e->path, client->ip);
+        size_t offset = 0;
+        size_t data_len = e->len;
+        while (offset < data_len) {
+            size_t sent = http_write(client, e->data + offset, data_len);
+            if (sent == -1) {
+                log_error(log, "Error sending data to client %s: %s", client->ip, strerror(errno));
+                goto terminate;
+            }
+            data_len -= sent;
+            offset += sent;
+        }
+    }
+terminate:
+    if (uri != NULL) {
+        free(uri);
+    }
+    request_free(request);
+    http_client_close(client);
+    debug_return NULL;
 }
 
 static int handle_connections(http_server_s *server) {
@@ -535,7 +530,76 @@ shutdown:
     debug_return rc;
 }
 
-static void reload_handler(int sig) {
+static int init_signal_handlers(void) {
+    debug_enter();
+    struct sigaction sa;
+    sa.sa_handler = sig_handler_ctlc;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        log_error(log, "ctl-c signal initialization failed: %s", strerror(errno));
+        debug_return 1;
+    }
+    sa.sa_handler = sig_handler_reload;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGUSR1, &sa, NULL) == -1) {
+        log_error(log, "reload signal initialization failed: %s", strerror(errno));
+        debug_return 1;
+    }
+    debug_return 0;
+}
+
+static int init_ssl(void) {
+    debug_enter();
+    debug("ssl enabled\n");
+    log_info(log, "ssl enabled");
+    if (ssl_cert_filename == NULL) {
+        log_error(log, "ssl certificate filename not specified");
+        debug_return 1;
+    }
+    if (ssl_key_filename == NULL) {
+        log_error(log, "ssl key filename not specified");
+        debug_return 1;
+    }
+    SSL_library_init();
+    SSL_load_error_strings();
+    OpenSSL_add_all_algorithms();
+    ERR_clear_error();
+    if (!(ssl_ctx = SSL_CTX_new(TLS_server_method()))) {
+        log_error(log, "failed to initialize ssl context: %s", ERR_reason_error_string(ERR_get_error()));
+        debug_return 1;
+    }
+    SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
+    ERR_clear_error();
+    if (!SSL_CTX_set_cipher_list(ssl_ctx, strong_ciphers)) {
+        log_error(log, "failed to set strong cipher list: %s", ERR_reason_error_string(ERR_get_error()));
+        debug_return 1;
+    }
+    ERR_clear_error();
+    if (SSL_CTX_use_certificate_file(ssl_ctx, ssl_cert_filename, SSL_FILETYPE_PEM) <= 0) {
+        log_error(log, "failed to load ssl cert %s: %s", ssl_cert_filename, ERR_reason_error_string(ERR_get_error()));
+        debug_return 1;
+    }
+    ERR_clear_error();
+    if (SSL_CTX_use_PrivateKey_file(ssl_ctx, ssl_key_filename, SSL_FILETYPE_PEM) <= 0) {
+        log_error(log, "failed to load ssl key %s: %s", ssl_key_filename, ERR_reason_error_string(ERR_get_error()));
+        debug_return 1;
+    }
+    ERR_clear_error();
+    if (!SSL_CTX_check_private_key(ssl_ctx)) {
+        log_error(log, "private key %s does not match the certificate %s", ssl_key_filename, ssl_cert_filename);
+        debug_return 1;
+    }
+    debug_return 0;
+}
+
+static void sig_handler_ctlc(int sig) {
+    (void)sig;
+    terminate = 1;
+}
+
+static void sig_handler_reload(int sig) {
     (void)sig;
     reload = 1;
 }
