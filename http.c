@@ -44,6 +44,7 @@ http_client_s *http_accept(http_server_s *server) {
         if (cache_load(server->html_path, server->log) != 0) {
             debug_return NULL;
         }
+        reload = 0;
     }
     if (client->fd < 0) {
         log_error(server->log, "accept failed: %s", strerror(errno));
