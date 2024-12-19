@@ -6,34 +6,31 @@
 #       The default target, if no target is specified. Compiles source files
 #       as necessary and links them into the final executable.
 #   bear
-#      Generates a compile_commands.json file for use with LSPs.
+#       Generates a compile_commands.json file for use with LSPs.
 #   clean
 #       Removes all object files and executables.
 #   install
-#      Installs executable and scripts into the directory specified by the prefi    x
-#      variable. Defaults to /usr/local.
+#       Installs executable and scripts into the directory specified by the prefix
+#       variable. Defaults to /usr/local.
 #   uninstall
-#      Removes the executabl from bin, all the scripts from sbin
+#       Removes the executable from prefix/bin, conf file from /etc, systemd service 
+#       files from /etc/systemd and /usr/lib/systemd
 # Variables:
 #   CC
-#      The C compiler to use. Defaults to gcc.
+#       The C compiler to use. Defaults to gcc.
 #   CFLAGS
-#      Flags to pass to the C compiler. Defaults to -I/usr/include. If libcurl
-#      or libjson-c are installed in a non-standard location, you may need to
-#      add -I/path/to/include to this variable. On Mac OS, for example, I use
-#      MacPorts, so I use make CFLAGS="-I/opt/local/include".
+#       Flags to pass to the C compiler. Defaults to -I/usr/include.
 #   debug=1
 #       Build with debug logging to stdout
 #	gdb=1
 #		Build with debugging symbols
 #   LDFLAGS
-#      Flags to pass to the linker. Defaults to -L/usr/lib. If libcurl or
-#      libjson-c are installed in a non-standard location, you may need to add
-#      -L/path/to/lib to this variable. On Mac OS, for example, I use MacPorts,
-#      so I use make LDFLAGS="-L/opt/local/lib".
+#       Flags to pass to the linker. Defaults to -L/usr/lib.
 #   prefix
-#      The directory to install into. Defaults to /usr/local. Executables will b    e
-#      installed into $(prefix)/bin, scripts in $(prefix)/sbin
+#       The directory to install into. Defaults to /usr/local. Executables will be
+#       installed into $(prefix)/bin, nvhttpd.conf in /etc, nvhttpd.service in 
+#       /usr/lib/systemd/system (which is then linked to 
+#       /etc/systemd/system/multi-user.target.wants)
 #
 
 ifeq ($(CC),)
@@ -56,6 +53,7 @@ endif
 
 EXES = nvhttpd
 OBJS = main.o cache.o config.o debug.o http.o log.o request.o response.o
+LIBS = -lssl -lcrypto
 
 .PHONY: all bear clean help install uninstall
 
@@ -89,42 +87,47 @@ response.o: response.c debug.h http.h log.h request.h response.h
 
 help:
 	@echo -e "Targets:"
-	@echo -e "\tall"
-	@echo -e "\t\tThe default target, if no target is specified. Compiles source files"
-	@echo -e "\t\tas necessary and links them into the final executable."
-	@echo -e "\tbear"
-	@echo -e "\t\tGenerates a compile_commands.json file for use with LSPs."
-	@echo -e "\tclean"
-	@echo -e "\t\tRemoves all object files and executables."
-	@echo -e "\tinstall"
-	@echo -e "\t\tInstalls executable and scripts into the directory specified by the prefix"
-	@echo -e "\t\tvariable. Defaults to /usr/local."
-	@echo -e "\tuninstall"
-	@echo -e "\t\tRemoves the executabl from bin, all the scripts from sbin"
+	@echo -e "  all"
+	@echo -e "    The default target, if no target is specified. Compiles source files"
+	@echo -e "    as necessary and links them into the final executable."
+	@echo -e "  bear"
+	@echo -e "    Generates a compile_commands.json file for use with LSPs."
+	@echo -e "  clean"
+	@echo -e "    Removes all object files and executables."
+	@echo -e "  install"
+	@echo -e "    Installs executable and scripts into the directory specified by the prefix"
+	@echo -e "    variable. Defaults to /usr/local."
+	@echo -e "  uninstall"
+	@echo -e "    Removes the executable from prefix/bin, conf file from /etc, systemd service"
+	@echo -e "    files from /etc/systemd and /usr/lib/systemd. Removes the executable from bin,"
+	@echo -e "    all the scripts from sbin."
 	@echo -e "Variables:"
-	@echo -e "\tCC"
-	@echo -e "\t\tThe C compiler to use. Defaults to gcc."
-	@echo -e "\tCFLAGS"
-	@echo -e "\t\tFlags to pass to the C compiler. Defaults to -I/usr/include. If libcurl"
-	@echo -e "\t\tor libjson-c are installed in a non-standard location, you may need to"
-	@echo -e "\t\tadd -I/path/to/include to this variable. On Mac OS, for example, I use"
-	@echo -e "\t\tMacPorts, so I use make CFLAGS=\"-I/opt/local/include\"."
-	@echo -e "\tdebug=1"
-	@echo -e "\t\tBuild with debug logging to stdout"
-	@echo -e "\tgdb=1"
-	@echo -e "\t\tBuild with debugging symbols"
-	@echo -e "\tLDFLAGS"
-	@echo -e "\t\tFlags to pass to the linker. Defaults to -L/usr/lib. If libcurl or"
-	@echo -e "\t\tlibjson-c are installed in a non-standard location, you may need to add"
-	@echo -e "\t\t-L/path/to/lib to this variable. On Mac OS, for example, I use MacPorts,"
-	@echo -e "\t\tso I use make LDFLAGS=\"-L/opt/local/lib\"."
-	@echo -e "\tprefix"
-	@echo -e "\t\tThe directory to install into. Defaults to /usr/local. Executables will be"
-	@echo -e "\t\tinstalled into $(prefix)/bin, scripts in $(prefix)/sbin"
+	@echo -e "  CC"
+	@echo -e "    The C compiler to use. Defaults to gcc."
+	@echo -e "  CFLAGS"
+	@echo -e "    Flags to pass to the C compiler. Defaults to -I/usr/include."
+	@echo -e "  debug=1"
+	@echo -e "    Build with debug logging to stdout"
+	@echo -e "  gdb=1"
+	@echo -e "    Build with debugging symbols"
+	@echo -e "  LDFLAGS"
+	@echo -e "    Flags to pass to the linker. Defaults to -L/usr/lib."
+	@echo -e "  prefix"
+	@echo -e "    The directory to install into. Defaults to /usr/local. Executables will be"
+	@echo -e "    installed into $(prefix)/bin, nvhttpd.conf in /etc, nvhttpd.service in"
+	@echo -e "    /usr/lib/systemd/system (which is then linked to"
+	@echo -e "    /etc/systemd/system/multi-user.target.wants)"
 
 install: $(EXES)
 	install -d $(prefix)/bin
+	install -d /etc/nvhttpd
 	install -m 755 $(EXES) $(prefix)/bin
+	install -m 755 nvhttpd.conf /etc/nvhttpd
+	cat nvhttpd.service | sed s:##PREFIX##:$(prefix):g > /usr/lib/systemd/system/nvhttpd.service
+	ln -s /usr/lib/systemd/system/nvhttpd.service /etc/systemd/multi-user.target.wants/nvhttpd.service
 
 uninstall:
+	- rm -f /etc/systemd/system/multi-user.target.wants/nvhttpd.service
+	- rm -f /usr/lib/systemd/system/nvhttpd.service
+	- rm -rf /etc/nvhttpd
 	- rm -f $(prefix)/bin/$(EXES)
