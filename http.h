@@ -12,6 +12,7 @@
 
 #include <netinet/in.h>
 #include <openssl/ssl.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <sys/socket.h>
 
@@ -32,6 +33,7 @@ typedef struct http_variable_s {
  * connections, the log handle for logging output and the address structure.
  */
 typedef struct http_server_s {
+    const char const *html_path;
     log_s *log;
     int fd;
     SSL_CTX *ssl_ctx;
@@ -51,6 +53,8 @@ typedef struct http_client_s {
     struct sockaddr_in addr;
     socklen_t addr_len;
 } http_client_s;
+
+extern volatile sig_atomic_t reload;
 
 /**
  * @brief Accept a client connection.
@@ -80,12 +84,13 @@ extern void http_close(http_server_s *server);
  * given IP address and port and will use the passed log.
  * @param log The log handle to write to.
  * @param ssl_ctx SSL context, NULL if not using SSL.
+ * @param html_path Path to HTML.
  * @param server_ip IP for the server to listen on.
  * @param port Port for the server to listen on.
  * @return Pointer to the http_server_s representing the HTTP connection, or
  * NULL on error. 
  */
-extern http_server_s *http_init(log_s *log, SSL_CTX *ssl_ctx, char *server_ip, int port);
+extern http_server_s *http_init(log_s *log, SSL_CTX *ssl_ctx, const char const *html_path, char *server_ip, int port);
 
 extern size_t http_read(http_client_s *client, void *buffer, size_t len);
 extern size_t http_write(http_client_s *client, const void const *buffer, size_t len);
