@@ -9,6 +9,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <getopt.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <pthread.h>
@@ -34,6 +35,8 @@ static const char response_400_path[] = "/error/400.html";
 static const char response_404_path[] = "/error/404.html";
 static const char response_500_path[] = "/error/500.html";
 static const char response_501_path[] = "/error/501.html";
+
+static const char const *program_name = "nvhttpd";
 
 static const char cfg_filename[] = "nvhttpd.conf";
 static const char cfg_filename_primary[] = "/etc/nvhttpd/nvhttpd.conf";
@@ -188,7 +191,7 @@ static config_error_t config_handler(char *section, char *key, char *value) {
                 goto term;
             }
         } else if (strcasecmp(key, "html_path") == 0) {
-            html_path = strdup(html_path);
+            html_path = strdup(value);
             if (html_path == NULL) {
                 fprintf(stderr, "failed to allocate html path: %s\n", strerror(errno));
                 rc = CONFIG_ERROR_NO_MEMORY;
@@ -485,7 +488,6 @@ static void *handle_client_request(void *arg) {
         free(header);
     }
     if (request->method == REQUEST_METHOD_GET) {
-        //log_info(log, "sending response data for file %s to client %s", e->path, client->ip);
         size_t offset = 0;
         size_t data_len = e->len;
         while (offset < data_len) {
