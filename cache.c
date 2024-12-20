@@ -20,6 +20,8 @@
 #include "cache.h"
 #include "debug.h"
 
+static const int max_cache_elements = 65534;
+
 typedef struct cache_s {
     log_s *log;
     size_t capacity;
@@ -42,7 +44,7 @@ cache_element_s *cache_find(const char const *path) {
     debug_enter();
     cache_element_s *p = NULL;
     size_t full_hash = hash(path);
-    log_debug(cache->log, "Looking up hash %04x", full_hash);
+    log_debug(cache->log, "Looking up hash %04x for path %s", full_hash, path);
     pthread_rwlock_rdlock(&cache_rw_lock);
     if (cache == NULL) {
         goto term;
@@ -51,6 +53,7 @@ cache_element_s *cache_find(const char const *path) {
     size_t index_original = index;
     while (cache->data[index].path != NULL) {
         if (strcmp(cache->data[index].path, path) == 0) {
+            debug("cache hit for path %s\n", path);
             p = &cache->data[index];
             goto term;
         }
@@ -70,7 +73,9 @@ term:
 }
 
 int cache_init(void) {
+    debug_enter();
     pthread_rwlock_init(&cache_rw_lock, NULL);
+    debug_return 0;
 }
 
 int cache_load(const char const *path, log_s *log) {
@@ -89,6 +94,12 @@ int cache_load(const char const *path, log_s *log) {
     if (load_dir(new, &file_list, path, path) != 0) {
         free(new);
         new = NULL;
+        goto term;
+    }
+    if (new->count > max_cache_elements) {
+        debug("maximum cache capacity %d exceeded: %d", max_cache_elements, new->count);
+        log_error(log, "number of files %d exceeds maximum cache capacity %d", new->count, max_cache_elements);
+        free(new);
         goto term;
     }
     debug("caching %d files\n", new->count);
@@ -117,7 +128,7 @@ int cache_load(const char const *path, log_s *log) {
     new->mask = capacity;
     capacity++;
     new->capacity = capacity;
-    debug("capacity = %d\n", capacity);
+    debug("cache capacity = %d elements\n", capacity);
     if ((new->data = calloc(capacity, sizeof(cache_element_s))) == NULL) {
         free(new);
         new = NULL;
@@ -180,22 +191,45 @@ term:
 
 static const char *determine_mime(cache_element_s *e) {
     debug_enter();
-    const char *mime = "application/octet-stream";
-    if (strstr(e->path, ".css") != NULL) {
-        mime = "text/css";
-    } else if (strstr(e->path, ".js") != NULL) {
-        mime = "application/javascript";
-    } else if (strstr(e->path, ".jpg") != NULL || strstr(e->path, ".jpeg") != NULL) {
-        mime = "image/jpeg";
-    } else if (strstr(e->path, ".ico") != NULL) {
-        mime = "image/x-icon";
-    } else if (strstr(e->path, ".svg") != NULL) {
-        mime = "image/svg+xml";    } else if (strstr(e->path, ".webmanifest") != NULL) {
-        mime = "application/manifest+json";
-    } else if (strstr(e->path, ".html") != NULL) {
-        mime = "text/html; charset=UTF-8";
+    const char *cp = strrchr(e->path, '.');
+    if (cp == NULL || *(cp + 1) == '\0') {
+        debug_return "application/octet-stream";
     }
-    debug_return mime;
+    cp++;
+    if (strcasecmp(cp, "css") == 0) {
+        debug_return "text/css";
+    } 
+    if (strcasecmp(cp, "docx") == 0) {
+        debug_return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    }
+    if (strcasecmp(cp, "html") == 0) {
+        debug_return "text/html; charset=UTF-8";
+    }
+    if (strcasecmp(cp, "ico") == 0) {
+        debug_return "image/x-icon";
+    }
+    if (strcasecmp(cp, "jpg") == 0 || strcasecmp(cp, "jpeg") == 0) {
+        debug_return "image/jpeg";
+    }
+    if (strcasecmp(cp, "js") == 0) {
+        debug_return "application/javascript";
+    }
+    if (strcasecmp(cp, "md") == 0) {
+        debug_return "text/markdown";
+    }
+    if (strcasecmp(cp, "png") == 0) {
+        debug_return "image/png";
+    }
+    if (strcasecmp(cp, "svg") == 0) {
+        debug_return "image/svg+xml";    
+    }
+    if (strcasecmp(cp, "webmanifest") == 0) {
+        debug_return "application/manifest+json";
+    }
+    if (strcasecmp(cp, "xml") == 0) {
+        debug_return "text/xml";
+    }
+    debug_return "application/octet-stream";
 }
 
 static void free_cache(cache_s *cache) {
@@ -291,7 +325,6 @@ static int load_dir(cache_s *cache, cache_element_s **list, const char const *ba
     }
     debug("base_path = %s, path = %s\n", base_path, path);
     struct dirent *entry;
-    cache->count = 0;
     DIR *dp = opendir(path);
     if (dp == NULL) {
         log_error(cache->log, "Error opening directory %s: %s", path, strerror(errno));
