@@ -37,6 +37,9 @@ static const char response_500_path[] = "/error/500.html";
 static const char response_501_path[] = "/error/501.html";
 
 static const char const *program_name = "nvhttpd";
+static const char const *program_ver_major = "0";
+static const char const *program_ver_minor = "0";
+static const char const *program_ver_revision = "1";
 
 static const char cfg_filename[] = "nvhttpd.conf";
 static const char cfg_filename_primary[] = "/etc/nvhttpd/nvhttpd.conf";
