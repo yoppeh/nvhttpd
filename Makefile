@@ -52,7 +52,7 @@ ifeq ($(prefix),)
 endif
 
 EXES = nvhttpd
-OBJS = main.o cache.o config.o debug.o http.o log.o request.o response.o
+OBJS = main.o cache.o config.o debug.o http.o log.o option.o request.o response.o
 LIBS = -lssl -lcrypto
 
 .PHONY: all bear clean help install uninstall
@@ -78,7 +78,8 @@ config.o: config.c config.h debug.h
 debug.o: debug.c debug.h
 http.o: http.c debug.h http.h log.h
 log.o: log.c log.h
-main.o: main.c cache.h debug.h http.h log.h request.h response.h
+main.o: main.c cache.h debug.h http.h log.h option.h request.h response.h
+option.o: option.c debug.h option.h
 request.o: request.c debug.h http.h log.h request.h
 response.o: response.c debug.h http.h log.h request.h response.h
 
