@@ -26,20 +26,21 @@
 #include "debug.h"
 #include "http.h"
 #include "log.h"
+#include "option.h"
 #include "request.h"
 #include "response.h"
 
 #define log_file_def stdout
 
+const char const *program_name = "nvhttpd";
+const char const *program_ver_major = "0";
+const char const *program_ver_minor = "0";
+const char const *program_ver_revision = "1";
+
 static const char response_400_path[] = "/error/400.html";
 static const char response_404_path[] = "/error/404.html";
 static const char response_500_path[] = "/error/500.html";
 static const char response_501_path[] = "/error/501.html";
-
-static const char const *program_name = "nvhttpd";
-static const char const *program_ver_major = "0";
-static const char const *program_ver_minor = "0";
-static const char const *program_ver_revision = "1";
 
 static const char cfg_filename[] = "nvhttpd.conf";
 static const char cfg_filename_primary[] = "/etc/nvhttpd/nvhttpd.conf";
@@ -57,6 +58,37 @@ static const char const *strong_ciphers =
     "ECDHE-RSA-CHACHA20-POLY1305:"
     "ECDHE-ECDSA-AES128-GCM-SHA256:"
     "ECDHE-RSA-AES128-GCM-SHA256";
+
+static option_s option_c = {
+    .name = "c", 
+    .description = "Specify /full/path/and/filename of config file", 
+    .arg_type = option_arg_required, 
+    .value = NULL, 
+    .validate = NULL, 
+    .present = false
+};
+static option_s option_h = {
+    .name = "h",
+    .description = "Show this help text",
+    .arg_type = option_arg_none,
+    .value = NULL,
+    .validate = NULL,
+    .present = false
+};
+static option_s option_v = {
+    .name = "v",
+    .description = "Show program version and exit",
+    .arg_type = option_arg_none,
+    .value = NULL,
+    .validate = NULL,
+    .present = false
+};
+static option_s *options[] = {
+    &option_c,
+    &option_h,
+    &option_v,
+    NULL
+};
 
 static log_levels_e log_level = LOG_DEBUG;
 static char *html_path = NULL;
@@ -92,21 +124,35 @@ int main(int argc, char *argv[]) {
     int pid_file = -1;
     http_server_s *server = NULL;
     int rc = 1;
+    if (option_parse_args(options, argc, argv) != 0) {
+        option_h.present = true;
+    }
+    if (option_v.present) {
+        printf("%s %s.%s.%s\n", program_name, program_ver_major, program_ver_minor, program_ver_revision);
+        goto shutdown;
+    }
+    if (option_h.present) {
+        option_show_help(options);
+        goto shutdown;
+    }
+    if (option_c.present) {
+        config_file = strdup((char *)option_c.value);
+    }
+    if (configure(argc, argv) != 0) {
+        goto shutdown;
+    }
     pid_file = open(pid_filename, (O_CREAT | O_WRONLY | O_TRUNC), S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
     if (pid_file == -1) {
-        fprintf(stderr, "unable to open pid file %s: %s", pid_filename, strerror(errno));
+        fprintf(stderr, "unable to open pid file %s: %s\n", pid_filename, strerror(errno));
         goto shutdown;
     }
     char pid_str[32];
     sprintf(pid_str, "%d", getpid());
     if (write(pid_file, pid_str, strlen(pid_str)) != strlen(pid_str)) {
-        fprintf(stderr, "unable to write pid file %s: %s", pid_filename, strerror(errno));
+        fprintf(stderr, "unable to write pid file %s: %s\n", pid_filename, strerror(errno));
     }
     close(pid_file);
     pid_file = -1;
-    if (configure(argc, argv) != 0) {
-        goto shutdown;
-    }
     log = log_init(log_level, server_string, log_file);
     if (log == NULL) {
         fprintf(stderr, "log initialization failed\n");
@@ -301,33 +347,35 @@ static int configure(int ac, char **av) {
     debug_enter();
     struct stat buffer;
     int rc = 1;
-    if (stat(cfg_filename_primary, &buffer) == 0) {
-        config_file = strdup(cfg_filename_primary);
-        if (config_file == NULL) {
-            fprintf(stderr, "strdup failed: %s", strerror(errno));
-            goto finish;
-        }
-    } else {
-        char *run_path = malloc(strlen(av[0]) + strlen(cfg_filename) + 1);
-        if (run_path == NULL) {
-            fprintf(stderr, "malloc failed: %s", strerror(errno));
-            goto finish;
-        }
-        strcpy(run_path, av[0]);
-        char *last_slash = strrchr(run_path, '/');
-        if (last_slash != NULL) {
-            *last_slash = '\0';
-        }
-        strcat(run_path, cfg_filename);
-        if (stat(run_path, &buffer) == 0) {
-            config_file = strdup(run_path);
+    if (config_file == NULL) {
+        if (stat(cfg_filename_primary, &buffer) == 0) {
+            config_file = strdup(cfg_filename_primary);
             if (config_file == NULL) {
                 fprintf(stderr, "strdup failed: %s", strerror(errno));
-                free(run_path);
                 goto finish;
             }
+        } else {
+            char *run_path = malloc(strlen(av[0]) + strlen(cfg_filename) + 1);
+            if (run_path == NULL) {
+                fprintf(stderr, "malloc failed: %s", strerror(errno));
+                goto finish;
+            }
+            strcpy(run_path, av[0]);
+            char *last_slash = strrchr(run_path, '/');
+            if (last_slash != NULL) {
+                *last_slash = '\0';
+            }
+            strcat(run_path, cfg_filename);
+            if (stat(run_path, &buffer) == 0) {
+                config_file = strdup(run_path);
+                if (config_file == NULL) {
+                    fprintf(stderr, "strdup failed: %s", strerror(errno));
+                    free(run_path);
+                    goto finish;
+                }
+            }
+            free(run_path);
         }
-        free(run_path);
     }
     if (config_file == NULL) {
         fprintf(stderr, "no config file specified and none found, using defaults\n");
