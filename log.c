@@ -3,7 +3,7 @@
  * @author Warren Mann (warren@nonvol.io)
  * @brief Logger implementation.
  * @version 0.1.0
- * @date 2024-04-11
+ * @date 2024-11-27
  * @copyright Copyright (c) 2024
  */
 
@@ -64,6 +64,9 @@ void log_cleanup(log_s *log) {
             pthread_mutex_unlock(&queue->mutex);
             pthread_join(queue->log_thread, NULL);
             free(queue);
+        }
+        if (log->fs != stderr && log->fs != stdout && log->fs > 0) {
+            fclose(log->fs);
         }
         free(log);
     }

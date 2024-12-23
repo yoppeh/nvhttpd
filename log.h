@@ -6,7 +6,7 @@
  * macros to log messages. See main.c for an example. The default maximum
  * message size is 2048 bytes.
  * @version 0.1.0
- * @date 2024-02-26
+ * @date 2024-11-27
  * @copyright Copyright (c) 2024
  */
 
