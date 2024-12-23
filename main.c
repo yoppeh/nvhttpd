@@ -59,6 +59,8 @@ static const char const *strong_ciphers =
     "ECDHE-ECDSA-AES128-GCM-SHA256:"
     "ECDHE-RSA-AES128-GCM-SHA256";
 
+volatile sig_atomic_t terminate = 0;
+
 static option_s option_c = {
     .name = "c", 
     .description = "Specify /full/path/and/filename of config file", 
@@ -107,8 +109,6 @@ static SSL_CTX *ssl_ctx = NULL;
 static char *ssl_cert_filename = NULL;
 static char *ssl_key_filename = NULL;
 static bool ssl_enabled = false;
-
-static volatile sig_atomic_t terminate = 0;
 
 static config_error_t config_handler(char *section, char *key, char *value);
 static int configure(int ac, char **av);
@@ -188,7 +188,6 @@ shutdown:
     debug("shutting down server with result code %d\n", rc);
     if (log != NULL) {
         log_info(log, "shutting down server with result code %d", rc);
-        log_cleanup(log);
     }
     if (response_headers != NULL) {
         free(response_headers);
@@ -213,8 +212,8 @@ shutdown:
     if (config_file != NULL) {
         free(config_file);
     }
-    if (log_file != stderr && log_file != stdout && log_file > 0) {
-        fclose(log_file);
+    if (log != NULL) {
+        log_cleanup(log);
     }
     if (pid_file >= 0) {
         close(pid_file);
@@ -569,11 +568,11 @@ static int handle_connections(http_server_s *server) {
         if (client != NULL) {
             if (pthread_attr_init(&attr) != 0) {
                 log_error(log, "pthread_attr_init failed: %s", strerror(errno));
-                goto shutdown;
+                continue;
             }
             if (pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) != 0) {
                 log_error(log, "pthread_attr_setdetachstate failed: %s", strerror(errno));
-                goto shutdown;
+                continue;
             }
             pthread_t thread_id;
             pthread_create(&thread_id, &attr, handle_client_request, (void *)client);
