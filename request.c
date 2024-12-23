@@ -133,7 +133,9 @@ request_parse_error_e request_parse(request_s *request) {
     log_debug(log, "parsing request from client %s", client->ip);
     res = get_method(request);
     if (res != REQUEST_PARSE_OK) {
+        debug("get_method() != REQUEST_PARSE_OK: %d\n", res);
         if (res == REQUEST_PARSE_BAD) {
+            debug("returning REQUEST_PARSE_NOT_IMPLEMENTED\n");
             debug_return REQUEST_PARSE_NOT_IMPLEMENTED;
         }
         debug_return res;
@@ -204,11 +206,9 @@ request_parse_error_e request_parse(request_s *request) {
         request->http_version_minor = http_version_minor_default;
     } else {
         if ((ch = get_http_ver(request)) != REQUEST_PARSE_OK) {
-            debug_return ch;
+            debug_return REQUEST_PARSE_IO_ERROR;
         }
     }
-    // Ignoring headers
-    debug_return REQUEST_PARSE_OK;
     if ((ch = io_next(request)) < IO_OK) {
         log_error(log, error_str_io);
         debug_return REQUEST_PARSE_IO_ERROR;
@@ -232,16 +232,17 @@ request_parse_error_e request_parse(request_s *request) {
         log_error(log, error_str_io);
         debug_return REQUEST_PARSE_IO_ERROR;
     }
-    if (ch != '\r') {
-        log_error(log, "invalid request from client %s: expected \\r", client->ip);
-        debug_return REQUEST_PARSE_BAD;
-    }
-    if ((ch = io_next(request)) < IO_OK) {
-        log_error(log, error_str_io);
-        debug_return REQUEST_PARSE_IO_ERROR;
-    }
-    if (ch != '\n') {
-        log_error(log, "invalid request from client %s: expected \\n", client->ip);
+    if (ch == '\r') {
+        if ((ch = io_next(request)) < IO_OK) {
+            log_error(log, error_str_io);
+            debug_return REQUEST_PARSE_IO_ERROR;
+        }
+        if (ch != '\n') {
+            log_error(log, "invalid request from client %s: expected \\n", client->ip);
+            debug_return REQUEST_PARSE_BAD;
+        }
+    } else if (ch != '\n') {
+        log_error(log, "invalid request from client %s: expected \\r or \\n", client->ip);
         debug_return REQUEST_PARSE_BAD;
     }
     debug_return REQUEST_PARSE_OK;
@@ -288,6 +289,7 @@ static int io_next(request_s *request) {
             return IO_EOF;
         }
         request->buffer_index = 0;
+        debug("io_next() received: %*s\n", request->buffer_len, request->buffer);
     }
     return request->buffer[request->buffer_index++];
 }
@@ -303,6 +305,7 @@ static int io_peek(request_s *request) {
             return IO_EOF;
         }
         request->buffer_index = 0;
+        debug("io_peek() received: %*s\n", request->buffer_len, request->buffer);
     }
     return request->buffer[request->buffer_index];
 }
