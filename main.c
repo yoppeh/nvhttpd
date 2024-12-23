@@ -117,6 +117,7 @@ static int handle_connections(http_server_s *server);
 static int init_signal_handlers(void);
 static int init_ssl(void);
 static void sig_handler_ctlc(int sig);
+static void sig_handler_pipe(int sig);
 static void sig_handler_reload(int sig);
 
 int main(int argc, char *argv[]) {
@@ -447,6 +448,7 @@ finish:
 static void *handle_client_request(void *arg) {
     debug_enter();
     char *uri = NULL;
+    char *header = NULL;
     if (arg == NULL) {
         debug_return NULL;
     }
@@ -520,37 +522,36 @@ static void *handle_client_request(void *arg) {
         }
     }
     size_t header_len = 0;
+    size_t out_len = 0;
     size_t data_len = (request->method == REQUEST_METHOD_GET) ? e->len : 0;
-    char *header = http_response_header(code, data_len, e->mime, response_headers, &header_len);
-    if (header != NULL) {
-        log_info(log, "sending response header to client %s", client->ip);
-        size_t offset = 0;
-        while (offset < header_len) {
-            size_t sent = http_write(client, header + offset, header_len);
-            if (sent == -1) {
-                log_error(log, "Error sending header to client %s: %s", client->ip, strerror(errno));
-                goto terminate;
-            }
-            header_len -= sent;
-            offset += sent;
-        }
-        send(client->fd, header, header_len, 0);
-        free(header);
+    header = http_response_header(code, data_len, e->mime, response_headers, &header_len);
+    out_len = header_len + data_len;
+    char *output = malloc(out_len);
+    if (output == NULL) {
+        log_error(log, "Error allocating %d bytes: %s", out_len, strerror(errno));
+        goto terminate;
     }
-    if (request->method == REQUEST_METHOD_GET) {
-        size_t offset = 0;
-        size_t data_len = e->len;
-        while (offset < data_len) {
-            size_t sent = http_write(client, e->data + offset, data_len);
-            if (sent == -1) {
-                log_error(log, "Error sending data to client %s: %s", client->ip, strerror(errno));
-                goto terminate;
-            }
-            data_len -= sent;
-            offset += sent;
+    memcpy(output, header, header_len);
+    if (data_len > 0) {
+        memcpy(output + header_len, e->data, data_len);
+    }
+    debug("sending http response: %*s\n", out_len, output);
+    size_t offset = 0;
+    while (out_len > 0) {
+        debug("out_len = %d, offset = %d\n", out_len, offset);
+        size_t sent = http_write(client, output + offset, out_len);
+        debug("sent = %d\n", sent);
+        if (sent < 1) {
+            log_error(log, "Error sending header to client %s: %s", client->ip, strerror(errno));
+            goto terminate;
         }
+        out_len -= sent;
+        offset += sent;
     }
 terminate:
+    if (header != NULL) {
+        free(header);
+    }
     if (uri != NULL) {
         free(uri);
     }
@@ -591,6 +592,13 @@ static int init_signal_handlers(void) {
     sa.sa_flags = 0;
     sigemptyset(&sa.sa_mask);
     if (sigaction(SIGINT, &sa, NULL) == -1) {
+        log_error(log, "ctl-c signal initialization failed: %s", strerror(errno));
+        debug_return 1;
+    }
+    sa.sa_handler = sig_handler_pipe;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGPIPE, &sa, NULL) == -1) {
         log_error(log, "ctl-c signal initialization failed: %s", strerror(errno));
         debug_return 1;
     }
@@ -651,6 +659,10 @@ static int init_ssl(void) {
 static void sig_handler_ctlc(int sig) {
     (void)sig;
     terminate = 1;
+}
+
+static void sig_handler_pipe(int sig) {
+    (void)sig;
 }
 
 static void sig_handler_reload(int sig) {
