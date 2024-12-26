@@ -194,7 +194,7 @@ void *writer(void *arg) {
             output->source,
             output->line,
             output->level);
-        fprintf(log->fs, output->buffer);
+        fputs(output->buffer, log->fs);
         fflush(log->fs);
         free(output);
     }
