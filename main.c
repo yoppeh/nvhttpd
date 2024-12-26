@@ -465,7 +465,6 @@ finish:
 
 static void *handle_client_request(void *arg) {
     debug_enter();
-    char *uri = NULL;
     char *header = NULL;
     if (arg == NULL) {
         debug_return NULL;
@@ -509,35 +508,22 @@ static void *handle_client_request(void *arg) {
                 break;
         }
     }
-    size_t path_len = strlen(path);
-    size_t html_len = strlen(html_path);
-    if ((uri = malloc(html_len + path_len + 1)) == NULL) {
-        log_error(log, "malloc failed: %s", strerror(errno));
-        goto terminate;
-    }
-    memcpy(uri, path, path_len + 1);
-    if ((e = cache_find(uri)) == NULL) {
-        log_error(client->server->log, "cache find failed");
-        if (code == HTTP_RESPONSE_200) {
-            code = HTTP_RESPONSE_404;
-            free(uri);
-            path = response_404_path;
-            path_len = strlen(path);
-            if ((uri = malloc(html_len + path_len + 1)) == NULL) {
-                log_error(log, "malloc failed: %s", strerror(errno));
-                goto terminate;
+    if (path != NULL) {
+        if ((e = cache_find(path)) == NULL) {
+            log_error(client->server->log, "cache find failed");
+            if (code == HTTP_RESPONSE_200) {
+                code = HTTP_RESPONSE_404;
+                path = response_404_path;
+                e = cache_find(path);
             }
-            memcpy(uri, html_path, html_len);
-            memcpy(uri + html_len, path, path_len + 1);
-            e = cache_find(uri);
         }
-        if (e == NULL) {
-            e = &cache_element;
-            cache_element.data = response_code_str[code];
-            cache_element.hash = 0;
-            cache_element.len = strlen(cache_element.data);
-            cache_element.mime = "text/plain";
-        }
+    }
+    if (e == NULL) {
+        e = &cache_element;
+        cache_element.data = response_code_str[code];
+        cache_element.hash = 0;
+        cache_element.len = strlen(cache_element.data);
+        cache_element.mime = "text/plain";
     }
     size_t header_len = 0;
     size_t out_len = 0;
@@ -569,9 +555,6 @@ static void *handle_client_request(void *arg) {
 terminate:
     if (header != NULL) {
         free(header);
-    }
-    if (uri != NULL) {
-        free(uri);
     }
     request_free(request);
     http_client_close(client);
