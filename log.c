@@ -179,7 +179,7 @@ void *writer(void *arg) {
         }
         struct tm tm;
         gmtime_r(&output->raw_time, &tm);
-        fprintf(log->fs, "%04i-%02i-%02i %02i:%02i:%02i  %s  % 6i  %08x  %s  % 6i  %-5s  ",
+        fprintf(log->fs, "%04i-%02i-%02i %02i:%02i:%02i  %s  % 6i  % 6i  %s  % 6i  %-5s  ",
             tm.tm_year + 1900,
             tm.tm_mon + 1,
             tm.tm_mday,
