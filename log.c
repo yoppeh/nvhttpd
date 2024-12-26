@@ -23,7 +23,7 @@
 
 // This is sum of the formatted string for the date and time, the app name, the
 // process id, the thread id, the source name, the line number, and the level.
-static const size_t LOG_BUFFER_SIZE = 1024;
+#define LOG_BUFFER_SIZE 1024
 
 static const char const *LEVELS[] = {
 	"ERROR",
@@ -34,9 +34,12 @@ static const char const *LEVELS[] = {
 };
 
 typedef struct output_s {
-    FILE *fs;
-    char *buffer;
-    size_t len;
+    time_t raw_time;
+    const char const *source;
+    int line;
+    const char const *level;
+    char buffer[LOG_BUFFER_SIZE];
+    pid_t tid;
     struct output_s *next;
 } output_s;
 
@@ -114,36 +117,22 @@ void log_write(log_s *log, log_levels_e level, const char *source_name, const in
 	struct tm tm;
 	struct tm *tm_ptr = &tm;
     size_t len;
-    // NOTE: This is a Linux specific call. It will not work on other platforms.
-    pid_t tid = syscall(__NR_gettid);
     if (log == NULL) {
         debug_return;
     }
-    output_s *output = malloc(sizeof(output_s) + LOG_BUFFER_SIZE);
+    output_s *output = malloc(sizeof(output_s));
     if (output == NULL) {
         perror("malloc failed");
         debug_return;
     }
-    output->buffer = (char *)output + sizeof(output_s);
-	time(&raw_time);
-	gmtime_r(&raw_time, tm_ptr);
-	va_start(ap, format);
-	len = snprintf(output->buffer, 
-        LOG_BUFFER_SIZE - 2,
-        "%04i-%02i-%02i %02i:%02i:%02i  %s  % 10u  %08x  %s  % 6i  %-5s  ", 
-        tm_ptr->tm_year + 1900, tm_ptr->tm_mon + 1, tm_ptr->tm_mday, 
-        tm_ptr->tm_hour, tm_ptr->tm_min, tm_ptr->tm_sec, 
-        log->app_name, log->pid, tid, 
-        source_name, line_number, 
-        LEVELS[level]);
-	len += vsnprintf(output->buffer + len, 
-        LOG_BUFFER_SIZE - len - 2, 
-        format, 
-        ap);
-    output->buffer[len++] = '\n';
-    output->buffer[len] = 0;
-    output->len = len;
-    output->fs = log->fs;
+    // NOTE: This is a Linux specific call. It will not work on other platforms.
+    output->tid = syscall(__NR_gettid);
+    output->source = source_name;
+    output->line = line_number;
+    output->level = LEVELS[level];
+	time(&output->raw_time);
+    va_start(ap, format);
+	vsnprintf(output->buffer, LOG_BUFFER_SIZE, format, ap);
 	va_end(ap);
     enqueue(log->queue, output);
     debug_return;
@@ -188,8 +177,23 @@ void *writer(void *arg) {
         if (output == NULL) {
             break;
         }
-        fputs(output->buffer, output->fs);
-        fflush(output->fs);
+        struct tm tm;
+        gmtime_r(&output->raw_time, &tm);
+        fprintf(log->fs, "%04i-%02i-%02i %02i:%02i:%02i  %s  % 6i  %08x  %s  % 6i  %-5s  ",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec,
+            log->app_name,
+            log->pid,
+            output->tid,
+            output->source,
+            output->line,
+            output->level);
+        fprintf(log->fs, output->buffer);
+        fprintf(log->fs, "\n");
         free(output);
     }
     return NULL;
