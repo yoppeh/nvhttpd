@@ -167,14 +167,14 @@ static output_s *dequeue(log_queue_s *queue) {
     while (queue->head == NULL && queue->stop == false) {
         pthread_cond_wait(&queue->cond, &queue->mutex);
     }
-    if (queue->stop == true) {
-        pthread_mutex_unlock(&queue->mutex);
-        return NULL;
-    }
     output_s *output = queue->head;
-    queue->head = output->next;
-    if (queue->head == NULL) {
-        queue->tail = NULL;
+    if (output != NULL) {
+        queue->head = output->next;
+        if (queue->head == NULL) {
+            queue->tail = NULL;
+        }
+    } else {
+        queue->head = queue->tail = NULL;
     }
     pthread_mutex_unlock(&queue->mutex);
     return output;
