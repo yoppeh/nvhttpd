@@ -132,7 +132,9 @@ void log_write(log_s *log, log_levels_e level, const char *source_name, const in
     output->level = LEVELS[level];
 	time(&output->raw_time);
     va_start(ap, format);
-	vsnprintf(output->buffer, LOG_BUFFER_SIZE, format, ap);
+	len = vsnprintf(output->buffer, LOG_BUFFER_SIZE, format, ap);
+    output->buffer[len++] = '\n';
+    output->buffer[len] = '\0';
 	va_end(ap);
     enqueue(log->queue, output);
     debug_return;
@@ -193,7 +195,6 @@ void *writer(void *arg) {
             output->line,
             output->level);
         fprintf(log->fs, output->buffer);
-        fprintf(log->fs, "\n");
         fflush(log->fs);
         free(output);
     }
