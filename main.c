@@ -44,7 +44,7 @@ static const char response_501_path[] = "/error/501.html";
 
 static const char cfg_filename[] = "nvhttpd.conf";
 static const char cfg_filename_primary[] = "/etc/nvhttpd/nvhttpd.conf";
-static const char pid_filename[] = "/var/run/nvhttpd.pid";
+static const char pid_filename_def[] = "/var/run/nvhttpd.pid";
 static const char html_path_def[] = "html";
 static const int server_port_def = 80;
 static const int server_ssl_port_def = 443;
@@ -98,6 +98,7 @@ static char *config_file = NULL;
 static char *server_ip = NULL;
 static int server_port = 0;
 static log_s *log = NULL;
+static char *pid_filename = NULL;
 static char *response_headers = NULL;
 static char **response_headers_array = NULL;
 static size_t response_headers_count = 0;
@@ -219,7 +220,10 @@ shutdown:
     if (pid_file >= 0) {
         close(pid_file);
     }
-    unlink(pid_filename);
+    if (pid_filename != NULL) {
+        unlink(pid_filename);
+        free(pid_filename);
+    }
     debug_return rc;
 }
 
@@ -315,6 +319,13 @@ static config_error_t config_handler(char *section, char *key, char *value) {
                     goto term;
                 }
             }
+        } else if (strcasecmp(key, "pid") == 0) {
+            pid_filename = strdup(value);
+            if (pid_filename == NULL) {
+                fprintf(stderr, "strdup failed: %s\n", strerror(errno));
+                rc = CONFIG_ERROR_NO_MEMORY;
+                goto term;
+            }
         }
     } else if (strcasecmp(section, "ssl") == 0) {
         if (strcasecmp(key, "certificate") == 0) {
@@ -401,6 +412,13 @@ static int configure(int ac, char **av) {
     if (html_path == NULL) {
         html_path = strdup(html_path_def);
         if (html_path == NULL) {
+            fprintf(stderr, "strdup failed: %s", strerror(errno));
+            goto finish;
+        }
+    }
+    if (pid_filename == NULL) {
+        pid_filename = strdup(pid_filename_def);
+        if (pid_filename == NULL) {
             fprintf(stderr, "strdup failed: %s", strerror(errno));
             goto finish;
         }
