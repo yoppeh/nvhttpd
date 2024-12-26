@@ -674,15 +674,25 @@ static int init_ssl(void) {
     debug_return 0;
 }
 
+/**
+ * @brief gracefully handle ctrl-c shutdown.
+ */
 static void sig_handler_ctlc(int sig) {
     (void)sig;
     terminate = 1;
 }
 
+/**
+ * @brief some browsers (ie) don't correctly terminate the ssl session, forcing
+ * a SIGPIPE on the server. This is to ignore that.
+ */
 static void sig_handler_pipe(int sig) {
     (void)sig;
 }
 
+/**
+ * @brief SIGUSER1 initiates a cache reload.
+ */
 static void sig_handler_reload(int sig) {
     (void)sig;
     reload = 1;
