@@ -156,36 +156,37 @@ http_server_s *http_init(log_s *log, SSL_CTX *ssl_ctx, const char const *html_pa
 }
 
 size_t http_read(http_client_s *client, void *buffer, size_t len) {
+    size_t size = 0;
     if (client->server->ssl_ctx == NULL) {
         debug("non-ssl reading %d bytes\n", len);
-        size_t size = recv(client->fd, buffer, len, 0);
+        size = recv(client->fd, buffer, len, 0);
         debug("non-ssl read %d of %d bytes\n", size, len);
     } else {
         debug("ssl reading %d bytes\n", len);
-        size_t size = SSL_read(client->ssl, buffer, len);
+        size = SSL_read(client->ssl, buffer, len);
         if (size < 0) {
             int err = SSL_get_error(client->ssl, size);
             debug("SSL_shutdown failed: %s\n", ERR_reason_error_string(ERR_get_error()));
         }
         debug("ssl read %d of %d bytes\n", size, len);
-        return size;
     }
+    return size;
 }
 
 size_t http_write(http_client_s *client, const void const *buffer, size_t len) {
+    size_t size = 0;
     if (client->server->ssl_ctx == NULL) {
         debug("non-ssl write\n");
-        size_t size = send(client->fd, buffer, len, 0);
+        size = send(client->fd, buffer, len, 0);
         debug("non-ssl wrote %d of %d bytes\n", size, len);
     } else {
-        size_t size = 0;
         debug("ssl writing %d bytes\n", len);
         if (SSL_write_ex(client->ssl, buffer, len, &size) == 1) {
             debug("ssl wrote %d of %d bytes\n", size, len);
-            return size;
         } else {
             debug("ssl write failed\n");
-            return 0;
+            size = 0;
         }
     }
+    return size;
 }

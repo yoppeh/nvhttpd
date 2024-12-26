@@ -226,7 +226,8 @@ request_parse_error_e request_parse(request_s *request) {
         debug_return REQUEST_PARSE_BAD;
     }
     if ((ch = get_headers(request)) != REQUEST_PARSE_OK) {
-        debug_return ch;
+        log_error(log, "invalid request from client %s: unable to parse headers", client->ip);
+        debug_return REQUEST_PARSE_BAD;
     }
     if ((ch = io_next(request)) < IO_OK) {
         log_error(log, error_str_io);
