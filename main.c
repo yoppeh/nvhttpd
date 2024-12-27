@@ -37,10 +37,10 @@ const char const *program_ver_major = "0";
 const char const *program_ver_minor = "0";
 const char const *program_ver_revision = "1";
 
-static const char response_400_path[] = "/error/400.html";
-static const char response_404_path[] = "/error/404.html";
-static const char response_500_path[] = "/error/500.html";
-static const char response_501_path[] = "/error/501.html";
+static const char response_400_path[] = "/error/400/index.html";
+static const char response_404_path[] = "/error/404/index.html";
+static const char response_500_path[] = "/error/500/index.html";
+static const char response_501_path[] = "/error/501/index.html";
 
 static const char cfg_filename[] = "nvhttpd.conf";
 static const char cfg_filename_primary[] = "/etc/nvhttpd/nvhttpd.conf";
