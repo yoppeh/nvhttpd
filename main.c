@@ -37,10 +37,10 @@ const char const *program_ver_major = "0";
 const char const *program_ver_minor = "0";
 const char const *program_ver_revision = "1";
 
-static const char response_400_path[] = "/error/400/index.html";
-static const char response_404_path[] = "/error/404/index.html";
-static const char response_500_path[] = "/error/500/index.html";
-static const char response_501_path[] = "/error/501/index.html";
+static const char response_400_path_def[] = "/e0rror/400.html";
+static const char response_404_path_def[] = "/error/404.html";
+static const char response_500_path_def[] = "/error/500.html";
+static const char response_501_path_def[] = "/error/501.html";
 
 static const char cfg_filename[] = "nvhttpd.conf";
 static const char cfg_filename_primary[] = "/etc/nvhttpd/nvhttpd.conf";
@@ -92,6 +92,10 @@ static option_s *options[] = {
     NULL
 };
 
+static char *response_400_path = NULL;
+static char *response_404_path = NULL;
+static char *response_500_path = NULL;
+static char *response_501_path = NULL;
 static log_levels_e log_level = LOG_DEBUG;
 static char *html_path = NULL;
 static char *config_file = NULL;
@@ -202,6 +206,18 @@ shutdown:
         }
         free(response_headers_array);
     }
+    if (response_501_path != NULL) {
+        free(response_501_path);
+    }
+    if (response_500_path != NULL) {
+        free(response_500_path);
+    }
+    if (response_404_path != NULL) {
+        free(response_404_path);
+    }
+    if (response_400_path != NULL) {
+        free(response_400_path);
+    }
     if (html_path != NULL) {
         free(html_path);
     }
@@ -247,6 +263,34 @@ static config_error_t config_handler(char *section, char *key, char *value) {
             html_path = strdup(value);
             if (html_path == NULL) {
                 fprintf(stderr, "failed to allocate html path: %s\n", strerror(errno));
+                rc = CONFIG_ERROR_NO_MEMORY;
+                goto term;
+            }
+        } else if (strcasecmp(key, "400_status_path") == 0) {
+            response_400_path = strdup(value);
+            if (response_400_path == NULL) {
+                fprintf(stderr, "failed to allocate 400 status path: %s\n", strerror(errno));
+                rc = CONFIG_ERROR_NO_MEMORY;
+                goto term;
+            }
+        } else if (strcasecmp(key, "404_status_path") == 0) {
+            response_404_path = strdup(value);
+            if (response_404_path == NULL) {
+                fprintf(stderr, "failed to allocate 404 status path: %s\n", strerror(errno));
+                rc = CONFIG_ERROR_NO_MEMORY;
+                goto term;
+            }
+        } else if (strcasecmp(key, "500_status_path") == 0) {
+            response_500_path = strdup(value);
+            if (response_500_path == NULL) {
+                fprintf(stderr, "failed to allocate 500 status path: %s\n", strerror(errno));
+                rc = CONFIG_ERROR_NO_MEMORY;
+                goto term;
+            }
+        } else if (strcasecmp(key, "501_status_path") == 0) {
+            response_501_path = strdup(value);
+            if (response_501_path == NULL) {
+                fprintf(stderr, "failed to allocate 501 status path: %s\n", strerror(errno));
                 rc = CONFIG_ERROR_NO_MEMORY;
                 goto term;
             }
@@ -398,6 +442,34 @@ static int configure(int ac, char **av) {
     if (config_rc != CONFIG_ERROR_NONE) {
         fprintf(stderr, "config_parse failed: %s", config_get_error_string(config_rc));
         goto finish;
+    }
+    if (response_501_path == NULL) {
+        response_501_path = strdup(response_501_path_def);
+        if (response_501_path == NULL) {
+            fprintf(stderr, "strdup failed: %s", strerror(errno));
+            goto finish;
+        }
+    }
+    if (response_500_path == NULL) {
+        response_500_path = strdup(response_500_path_def);
+        if (response_500_path == NULL) {
+            fprintf(stderr, "strdup failed: %s", strerror(errno));
+            goto finish;
+        }
+    }
+    if (response_404_path == NULL) {
+        response_404_path = strdup(response_404_path_def);
+        if (response_404_path == NULL) {
+            fprintf(stderr, "strdup failed: %s", strerror(errno));
+            goto finish;
+        }
+    }
+    if (response_400_path == NULL) {
+        response_400_path = strdup(response_400_path_def);
+        if (response_400_path == NULL) {
+            fprintf(stderr, "strdup failed: %s", strerror(errno));
+            goto finish;
+        }
     }
     if (server_string == NULL) {
         server_string = strdup(server_string_def);
