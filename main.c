@@ -37,7 +37,7 @@ const char const *program_ver_major = "0";
 const char const *program_ver_minor = "0";
 const char const *program_ver_revision = "1";
 
-static const char response_400_path_def[] = "/e0rror/400.html";
+static const char response_400_path_def[] = "/error/400.html";
 static const char response_404_path_def[] = "/error/404.html";
 static const char response_500_path_def[] = "/error/500.html";
 static const char response_501_path_def[] = "/error/501.html";
