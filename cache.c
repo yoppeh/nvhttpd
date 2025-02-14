@@ -43,6 +43,7 @@ static int load_dir(cache_s *cache, cache_element_s **list, const char const *ba
 cache_element_s *cache_find(const char const *path) {
     debug_enter();
     cache_element_s *p = NULL;
+    cache_element_s *r = NULL;
     size_t full_hash = hash(path);
     log_debug(cache->log, "Looking up hash %04x for path %s", full_hash, path);
     pthread_rwlock_rdlock(&cache_rw_lock);
@@ -63,13 +64,23 @@ cache_element_s *cache_find(const char const *path) {
         }
     }
 term:
-    pthread_rwlock_unlock(&cache_rw_lock);
     if (p == NULL) {
         log_debug(cache->log, "Hash entry %04x not found in cache", full_hash);
     } else {
+        size_t p_len = strlen(p->path) + 1;
+        r = malloc(sizeof(cache_element_s) + p->len + p_len);
+        r->next = NULL;
+        r->hash = p->hash;
+        r->len = p->len;
+        r->path = (char *)r + sizeof(cache_element_s);
+        r->mime = p->mime;
+        r->data = r->path + p_len;
+        memcpy(r->path, p->path, p_len);
+        memcpy(r->data, p->data, r->len);
         log_debug(cache->log, "Found hash entry %04x: %s", full_hash, p->path);
     }
-    debug_return p;
+    pthread_rwlock_unlock(&cache_rw_lock);
+    debug_return r;
 }
 
 int cache_init(void) {

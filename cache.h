@@ -26,9 +26,9 @@ typedef struct cache_element_s {
     struct cache_element_s *next;
     size_t hash;
     size_t len;
-    const char *path;
+    char *path;
     const char *mime;
-    const char *data;
+    char *data;
 } cache_element_s;
 
 /**

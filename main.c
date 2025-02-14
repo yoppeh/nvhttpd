@@ -591,11 +591,12 @@ static void *handle_client_request(void *arg) {
         }
     }
     if (e == NULL) {
-        e = &cache_element;
-        cache_element.data = response_code_str[code];
-        cache_element.hash = 0;
-        cache_element.len = strlen(cache_element.data);
-        cache_element.mime = "text/plain";
+        e = malloc(sizeof(cache_element_s));
+        e->data = (char *)response_code_str[code];
+        e->hash = 0;
+        e->len = strlen(cache_element.data);
+        e->mime = "text/plain";
+        e->next = NULL;
     }
     size_t header_len = 0;
     size_t out_len = 0;
@@ -611,6 +612,7 @@ static void *handle_client_request(void *arg) {
     if (data_len > 0) {
         memcpy(output + header_len, e->data, data_len);
     }
+    free(e);
     debug("sending http response: %*s\n", out_len, output);
     size_t offset = 0;
     while (out_len > 0) {
