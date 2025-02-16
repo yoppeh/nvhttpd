@@ -228,6 +228,9 @@ static const char *determine_mime(cache_element_s *e) {
     if (strcasecmp(cp, "md") == 0) {
         debug_return "text/markdown";
     }
+    if (strcasecmp(cp, "pdf") == 0) {
+        debug_return "application/pdf";
+    }
     if (strcasecmp(cp, "png") == 0) {
         debug_return "image/png";
     }
