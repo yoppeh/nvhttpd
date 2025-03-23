@@ -78,22 +78,22 @@ void http_client_close(http_client_s *client) {
         debug_return;
     }
     if (client->ssl != NULL) {
-        int ret;
-        if ((ret = SSL_shutdown(client->ssl)) == 0) {
-            ret = SSL_shutdown(client->ssl);
+        int ret = SSL_shutdown(client->ssl);
+        if (ret == 0) {
+            ret = SSL_shutdown(client->ssl); // Second call to complete shutdown
         }
-        debug("SSL_shutdown returned: %d\n", ret);
         if (ret < 0) {
             int err = SSL_get_error(client->ssl, ret);
-            debug("SSL_shutdown failed: %s\n", ERR_reason_error_string(ERR_get_error()));
+            log_error(client->server->log, "SSL_shutdown failed: %s (error code: %d)", 
+                      ERR_reason_error_string(ERR_get_error()), err);
         }
+        SSL_free(client->ssl); // Always free SSL, even on shutdown failure
+        client->ssl = NULL;
     }
     if (client->fd >= 0) {
         debug("closing client->fd\n");
         close(client->fd);
-    }
-    if (client->ssl != NULL) {
-        SSL_free(client->ssl);
+        client->fd = -1; // Prevent double close
     }
     debug("freeing client\n");
     free(client);

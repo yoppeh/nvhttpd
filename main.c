@@ -50,6 +50,7 @@ static const int server_port_def = 80;
 static const int server_ssl_port_def = 443;
 static const char server_ip_def[] = "any";
 static const char server_string_def[] = "nvhttpd";
+const int max_threads = 100;
 
 static const char const *strong_ciphers = 
     "ECDHE-ECDSA-AES256-GCM-SHA384:"
@@ -124,6 +125,8 @@ static int init_ssl(void);
 static void sig_handler_ctlc(int sig);
 static void sig_handler_pipe(int sig);
 static void sig_handler_reload(int sig);
+static pthread_mutex_t thread_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int active_threads = 0;
 
 int main(int argc, char *argv[]) {
     debug_enter();
@@ -626,12 +629,16 @@ static void *handle_client_request(void *arg) {
         out_len -= sent;
         offset += sent;
     }
-terminate:
+    terminate:
     if (header != NULL) {
         free(header);
     }
     request_free(request);
     http_client_close(client);
+    pthread_mutex_lock(&thread_mutex);
+    active_threads--;
+    pthread_mutex_unlock(&thread_mutex);
+    log_debug(log, "Thread terminated, active threads: %d", active_threads);
     debug_return NULL;
 }
 
@@ -640,18 +647,38 @@ static int handle_connections(http_server_s *server) {
     int rc = 1;
     while (!terminate) {
         http_client_s *client = http_accept(server);
-        pthread_attr_t attr;
         if (client != NULL) {
+            pthread_attr_t attr;
             if (pthread_attr_init(&attr) != 0) {
-                log_error(log, "pthread_attr_init failed: %s", strerror(errno));
+                log_error(server->log, "pthread_attr_init failed: %s", strerror(errno));
+                http_client_close(client);
                 continue;
             }
             if (pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) != 0) {
-                log_error(log, "pthread_attr_setdetachstate failed: %s", strerror(errno));
+                log_error(server->log, "pthread_attr_setdetachstate failed: %s", strerror(errno));
+                pthread_attr_destroy(&attr);
+                http_client_close(client);
                 continue;
             }
             pthread_t thread_id;
-            pthread_create(&thread_id, &attr, handle_client_request, (void *)client);
+            pthread_mutex_lock(&thread_mutex); // Add a mutex to protect active_threads
+            if (active_threads >= max_threads) {
+                log_warn(server->log, "Max threads (%d) reached, rejecting connection from %s", max_threads, client->ip);
+                http_client_close(client);
+                pthread_mutex_unlock(&thread_mutex);
+                continue;
+            }
+            active_threads++;
+            pthread_mutex_unlock(&thread_mutex);
+            if (pthread_create(&thread_id, &attr, handle_client_request, (void *)client) != 0) {
+                log_error(server->log, "pthread_create failed: %s", strerror(errno));
+                pthread_mutex_lock(&thread_mutex);
+                active_threads--;
+                pthread_mutex_unlock(&thread_mutex);
+                http_client_close(client);
+            } else {
+                log_debug(server->log, "Thread created for client %s, active threads: %d", client->ip, active_threads);
+            }
             pthread_attr_destroy(&attr);
         }
     }
